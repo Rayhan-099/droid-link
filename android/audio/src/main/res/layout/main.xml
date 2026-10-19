@@ -1,0 +1,339 @@
+<!--
+  Copyright (C) 2011 The Android Open Source Project
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:fitsSystemWindows="true"
+  xmlns:app="http://schemas.android.com/apk/res-auto">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="top"
+    android:orientation="vertical">
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelIpAddr"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center"
+        android:layout_toStartOf="@+id/center"
+        android:layout_centerVertical="true"
+        android:text="@string/labelIpAddr" />
+
+      <AutoCompleteTextView
+        android:id="@+id/editTextIpAddr"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_toRightOf="@+id/center"
+        android:layout_toEndOf="@+id/center"
+        android:layout_alignParentRight="true"
+        android:layout_alignParentEnd="true"
+        android:inputType="text"
+        android:hint="@string/hintIpAddr" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center2"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelAudioPort"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerVertical="true"
+        android:layout_toLeftOf="@+id/center2"
+        android:layout_toStartOf="@+id/center2"
+        android:text="@string/labelAudioPort" />
+
+      <AutoCompleteTextView
+        android:id="@+id/editTextAudioPort"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_toRightOf="@+id/center2"
+        android:layout_toEndOf="@+id/center2"
+        android:layout_alignParentRight="true"
+        android:layout_alignParentEnd="true"
+        android:inputType="number"
+        android:text="@string/defaultAudioPort"
+        android:hint="@string/hintAudioPort" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center3"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelSampleRate"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center3"
+        android:layout_toStartOf="@+id/center3"
+        android:layout_centerVertical="true"
+        android:text="@string/labelSampleRate" />
+
+      <Spinner
+        android:id="@+id/spinnerSampleRate"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toRightOf="@+id/center3"
+        android:layout_toEndOf="@+id/center3"
+        android:entries="@array/sampleRates" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center4"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelStereo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center4"
+        android:layout_toStartOf="@+id/center4"
+        android:layout_centerVertical="true"
+        android:text="@string/labelStereoMono" />
+
+      <Spinner
+        android:id="@+id/stereo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toRightOf="@+id/center4"
+        android:layout_toEndOf="@+id/center4"
+        android:entries="@array/stereo" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center5"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelBufferSize"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center5"
+        android:layout_toStartOf="@+id/center5"
+        android:layout_centerVertical="true"
+        android:text="@string/bufferSize" />
+
+      <EditText
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:inputType="number"
+        android:ems="10"
+        android:id="@+id/editTextBufferSize"
+        android:layout_toRightOf="@+id/center5"
+        android:layout_toEndOf="@+id/center5"
+        android:layout_gravity="center_horizontal"
+        android:hint="@string/bufferSizeHint"
+        android:importantForAutofill="no" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center6"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelRetry"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center6"
+        android:layout_toStartOf="@+id/center6"
+        android:layout_centerVertical="true"
+        android:text="@string/retry" />
+
+      <CheckBox
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:id="@+id/checkBoxRetry"
+        android:layout_centerVertical="true"
+        android:layout_toRightOf="@+id/center6"
+        android:layout_toEndOf="@+id/center6" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center7"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelUsePerformanceMode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center7"
+        android:layout_toStartOf="@+id/center7"
+        android:layout_centerVertical="true"
+        android:text="@string/usePerformanceMode" />
+
+      <CheckBox
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:id="@+id/checkBoxUsePerformanceMode"
+        android:layout_centerVertical="true"
+        android:layout_toRightOf="@+id/center7"
+        android:layout_toEndOf="@+id/center7" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center8"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelUseMinBuffer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center8"
+        android:layout_toStartOf="@+id/center8"
+        android:layout_centerVertical="true"
+        android:text="@string/useMinBuffer" />
+
+      <CheckBox
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:id="@+id/checkBoxUseMinBuffer"
+        android:layout_centerVertical="true"
+        android:layout_toRightOf="@+id/center8"
+        android:layout_toEndOf="@+id/center8" />
+    </RelativeLayout>
+
+    <RelativeLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+
+      <View
+        android:id="@+id/center9"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_centerHorizontal="true"
+        android:visibility="invisible" />
+
+      <TextView
+        android:id="@+id/labelUserMedia3"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toLeftOf="@+id/center9"
+        android:layout_toStartOf="@+id/center9"
+        android:layout_centerVertical="true"
+        android:text="@string/useMedia3" />
+
+      <CheckBox
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:id="@+id/checkBoxUseMedia3"
+        android:layout_centerVertical="true"
+        android:layout_toRightOf="@+id/center9"
+        android:layout_toEndOf="@+id/center9"
+        android:checked="true" />
+    </RelativeLayout>
+
+    <LinearLayout
+      android:layout_margin="8dp"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:gravity="center"
+      android:fitsSystemWindows="true"
+      android:orientation="horizontal">
+
+      <com.google.android.material.button.MaterialButton
+        android:id="@+id/playButton"
+        android:layout_width="64dp"
+        android:layout_height="64dp"
+        android:layout_margin="5dp"
+        android:background="@drawable/btn_play"
+        style="@style/Widget.MaterialComponents.Button"
+        app:backgroundTint="@null" />
+
+      <com.google.android.material.button.MaterialButton
+        android:id="@+id/stopButton"
+        android:layout_width="64dp"
+        android:layout_height="64dp"
+        android:layout_margin="5dp"
+        android:background="@drawable/btn_stop"
+        style="@style/Widget.MaterialComponents.Button"
+        app:backgroundTint="@null" />
+
+    </LinearLayout>
+
+  </LinearLayout>
+</ScrollView>

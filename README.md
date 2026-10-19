@@ -54,17 +54,17 @@ flowchart LR
 
     subgraph Tablet["Android Tablet (Redmi Pad)"]
         direction TB
-        MorelandApp["Moreland App\n(SurfaceView / H.264 Decoder)"]
-        SPP["SimpleProtocolPlayer\n(MusicService / AudioTrack)"]
+        DisplayApp["Droid Link Display\n(SurfaceView / H.264 Decoder)"]
+        AudioApp["Droid Link Audio\n(MusicService / AudioTrack)"]
         Screen["Extended Monitor Display"]
         Speakers["Tablet Speakers"]
 
-        MorelandApp --> Screen
-        SPP --> Speakers
+        DisplayApp --> Screen
+        AudioApp --> Speakers
     end
 
-    MorelandHost === ADB_Fwd === MorelandApp
-    SimpleTCP === ADB_Rev === SPP
+    MorelandHost === ADB_Fwd === DisplayApp
+    SimpleTCP === ADB_Rev === AudioApp
 ```
 
 Video and audio pipelines operate as **completely independent streams**: you can toggle audio on and off without flickering or interrupting the extended desktop, and vice versa.
@@ -149,9 +149,22 @@ cargo build --release
 cp target/release/moreland ~/.local/bin/
 ```
 
-### 4. Install Tablet Companion Apps
-- **Moreland Android Client**: Build or install `app-release.apk` from [Moreland](https://github.com/adiimanav/moreland).
-- **SimpleProtocolPlayer**: Build or install the open-source client from [kaytat/SimpleProtocolPlayer](https://github.com/kaytat/SimpleProtocolPlayer). See [android/README.md](android/README.md) for full instructions.
+### 4. Build & Install Android Companion Apps
+Droid Link includes first-party, reproducibly buildable Android companion apps under `android/`:
+- **Droid Link Display** (`io.github.rayhan099.droidlink.display`): High-framerate H.264 rendering surface.
+- **Droid Link Audio** (`io.github.rayhan099.droidlink.audio`): Low-latency TCP PCM audio receiver.
+
+Build both release APKs with a single command:
+```bash
+cd android
+./gradlew assembleRelease
+```
+Install them to your connected tablet:
+```bash
+adb install -r display/build/outputs/apk/release/display-release.apk
+adb install -r audio/build/outputs/apk/release/audio-release.apk
+```
+*(Legacy upstream apps `com.moreland.display` and `com.kaytat.simpleprotocolplayer` remain fully supported via seamless automatic fallback).*
 
 ---
 
@@ -168,7 +181,7 @@ cp target/release/moreland ~/.local/bin/
       ↓
 5. ADB Reverse Forwarding: adb reverse tcp:4711 tcp:4711
       ↓
-6. Tablet Player Launched via Intent: com.kaytat.simpleprotocolplayer.action.PLAY
+6. Tablet Player Launched via Intent: io.github.rayhan099.droidlink.audio.action.PLAY
       ↓
 7. System Default Sink switched to Tablet_Audio
       ↓

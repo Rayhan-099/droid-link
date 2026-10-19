@@ -48,12 +48,29 @@ get_device_serial() {
 
 DEVICE_SERIAL="$(get_device_serial)"
 
+DROIDLINK_AUDIO_PKG="io.github.rayhan099.droidlink.audio"
+LEGACY_AUDIO_PKG="com.kaytat.simpleprotocolplayer"
+
 is_device_connected() {
     [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" devices 2>/dev/null | grep -E "^${DEVICE_SERIAL}\s+device" >/dev/null 2>&1
 }
 
+get_audio_package() {
+    if [[ -z "${DEVICE_SERIAL}" ]]; then
+        echo ""
+        return
+    fi
+    if "${ADB}" -s "${DEVICE_SERIAL}" shell pm list packages 2>/dev/null | grep -q "${DROIDLINK_AUDIO_PKG}"; then
+        echo "${DROIDLINK_AUDIO_PKG}"
+    elif "${ADB}" -s "${DEVICE_SERIAL}" shell pm list packages 2>/dev/null | grep -q "${LEGACY_AUDIO_PKG}"; then
+        echo "${LEGACY_AUDIO_PKG}"
+    else
+        echo ""
+    fi
+}
+
 is_apk_installed() {
-    [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" -s "${DEVICE_SERIAL}" shell pm list packages 2>/dev/null | grep -q "com.kaytat.simpleprotocolplayer"
+    [[ -n "$(get_audio_package)" ]]
 }
 
 is_audio_active() {
@@ -110,9 +127,17 @@ start_audio() {
     "${ADB}" -s "${DEVICE_SERIAL}" reverse tcp:${AUDIO_PORT} tcp:${AUDIO_PORT}
 
     # 5. Start Android audio receiver service
-    echo "Starting audio receiver service on tablet..."
+    local pkg
+    pkg="$(get_audio_package)"
+    if [[ -z "${pkg}" ]]; then
+        pkg="${DROIDLINK_AUDIO_PKG}"
+    fi
+    local action="${pkg}.action.PLAY"
+    local service="${pkg}/.MusicService"
+
+    echo "Starting audio receiver service (${pkg}) on tablet..."
     "${ADB}" -s "${DEVICE_SERIAL}" shell am start-foreground-service \
-        -a com.kaytat.simpleprotocolplayer.action.PLAY \
+        -a "${action}" \
         --es ip_addr "127.0.0.1" \
         --ei audio_port ${AUDIO_PORT} \
         --ei sample_rate ${SAMPLE_RATE} \
@@ -120,9 +145,9 @@ start_audio() {
         --ez retry true \
         --ez use_performance_mode true \
         --ez use_min_buffer true \
-        com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || {
+        "${service}" >/dev/null 2>&1 || {
             "${ADB}" -s "${DEVICE_SERIAL}" shell am start-service \
-                -a com.kaytat.simpleprotocolplayer.action.PLAY \
+                -a "${action}" \
                 --es ip_addr "127.0.0.1" \
                 --ei audio_port ${AUDIO_PORT} \
                 --ei sample_rate ${SAMPLE_RATE} \
@@ -130,7 +155,7 @@ start_audio() {
                 --ez retry true \
                 --ez use_performance_mode true \
                 --ez use_min_buffer true \
-                com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || true
+                "${service}" >/dev/null 2>&1 || true
         }
 
     # 6. Route system audio to Tablet_Audio
@@ -172,6 +197,9 @@ stop_audio() {
 
     # 2. Tell Android player service to stop
     if is_device_connected; then
+        "${ADB}" -s "${DEVICE_SERIAL}" shell am start-service \
+            -a io.github.rayhan099.droidlink.audio.action.STOP \
+            io.github.rayhan099.droidlink.audio/.MusicService >/dev/null 2>&1 || true
         "${ADB}" -s "${DEVICE_SERIAL}" shell am start-service \
             -a com.kaytat.simpleprotocolplayer.action.STOP \
             com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || true
@@ -230,6 +258,13 @@ stop_audio() {
 
 status_audio() {
     echo "=== Tablet Audio Status ==="
+    local pkg
+    pkg="$(get_audio_package)"
+    if [[ -n "${pkg}" ]]; then
+        echo "Audio receiver app: ${pkg} (INSTALLED)"
+    else
+        echo "Audio receiver app: None detected (expected ${DROIDLINK_AUDIO_PKG} or ${LEGACY_AUDIO_PKG})"
+    fi
     if is_audio_active; then
         echo "Audio stream: ACTIVE (routed to Tablet_Audio)"
         if ss -tln 2>/dev/null | grep -q ":${AUDIO_PORT} "; then

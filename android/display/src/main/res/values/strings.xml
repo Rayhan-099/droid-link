@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Droid Link Display</string>
+    <string name="waiting_status">Droid Link Display\n\nWaiting for host…\nConnect tablet over USB and run \'tablet\' on Linux.</string>
+</resources>

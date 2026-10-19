@@ -79,6 +79,17 @@ if [[ "${DRY_RUN}" == false ]]; then
     systemctl --user daemon-reload || true
 fi
 
+# 6. Check Android companion APKs
+if [[ -f "${REPO_DIR}/android/display/build/outputs/apk/release/display-release.apk" && -f "${REPO_DIR}/android/audio/build/outputs/apk/release/audio-release.apk" ]]; then
+    echo ""
+    echo "Found built Android companion APKs:"
+    echo "  - Display: android/display/build/outputs/apk/release/display-release.apk"
+    echo "  - Audio:   android/audio/build/outputs/apk/release/audio-release.apk"
+    echo "To install on connected tablet:"
+    echo "  adb install -r android/display/build/outputs/apk/release/display-release.apk"
+    echo "  adb install -r android/audio/build/outputs/apk/release/audio-release.apk"
+fi
+
 echo ""
 echo "=== DroidLink installation complete! ==="
 echo "Ensure ${PREFIX} is in your PATH."

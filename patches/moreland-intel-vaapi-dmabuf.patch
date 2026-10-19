@@ -152,10 +152,105 @@ index e1a5460..e0aba9b 100644
      )
  }
 diff --git a/crates/daemon/src/session.rs b/crates/daemon/src/session.rs
-index 33a6c7f..096ff8f 100644
+index 33a6c7f..adb8694 100644
 --- a/crates/daemon/src/session.rs
 +++ b/crates/daemon/src/session.rs
-@@ -148,16 +148,17 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+@@ -15,8 +15,10 @@ use transport::{adb, stream_header, Sender};
+ 
+ use crate::output::VirtualOutput;
+ 
+-const APP_PACKAGE: &str = "com.moreland.display";
+-const APP_ACTIVITY: &str = "com.moreland.display/.DisplayActivity";
++const DROIDLINK_PACKAGE: &str = "io.github.rayhan099.droidlink.display";
++const DROIDLINK_ACTIVITY: &str = "io.github.rayhan099.droidlink.display/.DisplayActivity";
++const LEGACY_PACKAGE: &str = "com.moreland.display";
++const LEGACY_ACTIVITY: &str = "com.moreland.display/.DisplayActivity";
+ 
+ #[derive(Debug, Clone)]
+ pub struct Config {
+@@ -40,19 +42,8 @@ impl Default for Config {
+         Self {
+             resolution: None,
+             max_width: 1920,
+-            // Measured on Renoir + Pad 6 at 1920x1200, once capture and encode
+-            // were on the same GPU: median round trip 33.5 ms at 60, 25.5 ms at
+-            // 90, 18.8 ms at 120. Higher rates *lower* latency (a shorter frame
+-            // interval means less waiting for the next slot) and cost fewer
+-            // bytes, since smaller inter-frame deltas compress better. 144
+-            // saturates: 163 of 1764 frames unacked and a 208 ms stall.
+             fps: 90,
+             bitrate_kbps: 20_000,
+-            // Below a primary at 0x0, starting at y = 1080. This assumes the
+-            // primary is no taller than 1080px — on a taller display the
+-            // virtual output would overlap it rather than sit below. Override
+-            // with `--position`/`--position-y` if that does not hold for your
+-            // layout.
+             position_x: 0,
+             position_y: 1080,
+             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),
+@@ -62,9 +53,20 @@ impl Default for Config {
+     }
+ }
+ 
++pub fn resolve_app(serial: &str) -> Result<Option<(&'static str, &'static str)>> {
++    let out = adb::shell(serial, "pm list packages")?;
++    if out.contains(DROIDLINK_PACKAGE) {
++        Ok(Some((DROIDLINK_PACKAGE, DROIDLINK_ACTIVITY)))
++    } else if out.contains(LEGACY_PACKAGE) {
++        Ok(Some((LEGACY_PACKAGE, LEGACY_ACTIVITY)))
++    } else {
++        Ok(None)
++    }
++}
++
++#[allow(dead_code)]
+ pub fn app_installed(serial: &str) -> Result<bool> {
+-    let out = adb::shell(serial, &format!("pm list packages {APP_PACKAGE}"))?;
+-    Ok(out.contains(APP_PACKAGE))
++    Ok(resolve_app(serial)?.is_some())
+ }
+ 
+ /// Stream until `shutdown` is set, the device vanishes, or the app disconnects.
+@@ -72,13 +74,16 @@ pub fn app_installed(serial: &str) -> Result<bool> {
+ /// Every resource here is RAII-scoped: the virtual output and the adb forward
+ /// are removed when this function returns, however it returns.
+ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+-    if !app_installed(serial)? {
+-        bail!(
+-            "app not installed on the tablet.\n\
+-             Build it with `cd android && ANDROID_HOME=/opt/android-sdk ./gradlew assembleRelease`,\n\
+-             then `adb install -r android/app/build/outputs/apk/release/app-release.apk`."
+-        );
+-    }
++    let (app_pkg, app_activity) = match resolve_app(serial)? {
++        Some(app) => app,
++        None => {
++            bail!(
++                "Display app not installed on the tablet.\n\
++                 Expected io.github.rayhan099.droidlink.display (Droid Link Display)\n\
++                 or com.moreland.display (Legacy Moreland Display)."
++            );
++        }
++    };
+ 
+     // Match the tablet's own aspect ratio unless told otherwise, so the image
+     // fills its screen instead of letterboxing.
+@@ -131,7 +136,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+ 
+     // The abstract socket name is process-wide on Android, so a stale instance
+     // from a previous run would keep it bound and answer with a dead surface.
+-    let _ = adb::shell(serial, &format!("am force-stop {APP_PACKAGE}"));
++    let _ = adb::shell(serial, &format!("am force-stop {app_pkg}"));
+     std::thread::sleep(Duration::from_millis(500));
+ 
+     // Wake the tablet first. A sleeping or locked device starts the activity
+@@ -143,21 +148,22 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+     let _ = adb::shell(serial, "wm dismiss-keyguard");
+     std::thread::sleep(Duration::from_millis(400));
+ 
+-    adb::shell(serial, &format!("am start -n {APP_ACTIVITY}"))
++    adb::shell(serial, &format!("am start -n {app_activity}"))
+         .context("launching the display app")?;
      std::thread::sleep(Duration::from_millis(2500));
  
      // Probe what this machine's encoder can actually import rather than
@@ -177,6 +272,15 @@ index 33a6c7f..096ff8f 100644
              paint_cursor: config.paint_cursor,
          },
      )?;
+@@ -264,7 +270,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+ 
+     // Leaving the app in the foreground with a dead socket is confusing; send
+     // it home so the tablet returns to a normal state.
+-    let _ = adb::shell(serial, &format!("am force-stop {APP_PACKAGE}"));
++    let _ = adb::shell(serial, &format!("am force-stop {app_pkg}"));
+ 
+     drop(forward);
+     drop(output);
 diff --git a/crates/encoder/src/bin/encode_probe.rs b/crates/encoder/src/bin/encode_probe.rs
 index c13bb24..f98bf5e 100644
 --- a/crates/encoder/src/bin/encode_probe.rs

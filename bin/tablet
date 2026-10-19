@@ -91,6 +91,13 @@ case "${1:-start}" in
     dev="$(get_device_serial)"
     if [[ -n "${dev}" ]] && "${ADB}" devices 2>/dev/null | grep -E "^${dev}\s+device" >/dev/null 2>&1; then
         echo "Device: ${dev} (AUTHORIZED & CONNECTED)"
+        if "${ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "io.github.rayhan099.droidlink.display"; then
+            echo "Display App: io.github.rayhan099.droidlink.display (Droid Link Display)"
+        elif "${ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "com.moreland.display"; then
+            echo "Display App: com.moreland.display (Legacy Moreland Display)"
+        else
+            echo "Display App: None detected (expected io.github.rayhan099.droidlink.display)"
+        fi
     elif [[ -n "${dev}" ]]; then
         echo "Device: ${dev} (CONFIGURED, BUT NOT CONNECTED OR UNAUTHORIZED)"
     else

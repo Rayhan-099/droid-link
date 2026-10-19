@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DroidLink.Display" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/droidlink_bg</item>
+        <item name="android:colorBackground">@color/droidlink_bg</item>
+    </style>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="droidlink_bg">#0B0F19</color>
+    <color name="droidlink_cyan">#06B6D4</color>
+    <color name="droidlink_blue">#3B82F6</color>
+    <color name="droidlink_text_secondary">#94A3B8</color>
+</resources>

@@ -40,16 +40,16 @@ flowchart TB
     end
 
     subgraph AndroidTablet["Android Tablet (Redmi Pad / HyperOS)"]
-        MorelandApp["Moreland Display Client\n(SurfaceView / MediaCodec)"]
-        AudioApp["SimpleProtocolPlayer\n(MusicService / AudioTrack)"]
+        DisplayApp["Droid Link Display\n(SurfaceView / MediaCodec)"]
+        AudioApp["Droid Link Audio\n(MusicService / AudioTrack)"]
         TabletScreen["Extended Desktop (2560x1600)"]
         TabletSpeakers["Hardware Quad Speakers"]
 
-        MorelandApp --> TabletScreen
+        DisplayApp --> TabletScreen
         AudioApp --> TabletSpeakers
     end
 
-    MorelandDaemon === ADB_Video === MorelandApp
+    MorelandDaemon === ADB_Video === DisplayApp
     SimpleTCP === ADB_Audio === AudioApp
 ```
 
@@ -82,7 +82,7 @@ flowchart TB
    ```bash
    adb reverse tcp:4711 tcp:4711
    ```
-4. **Android Audio Mixer**: SimpleProtocolPlayer's `MusicService` reads raw PCM from `127.0.0.1:4711` and writes to Android's native `AudioTrack` mixer in low-latency performance mode.
+4. **Android Audio Mixer**: Droid Link Audio's `MusicService` reads raw PCM from `127.0.0.1:4711` and writes to Android's native `AudioTrack` mixer in low-latency performance mode.
 
 ---
 

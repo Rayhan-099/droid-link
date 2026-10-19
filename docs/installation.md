@@ -71,18 +71,28 @@ cp target/release/moreland ~/.local/bin/
 
 ---
 
-## 4. Tablet Companion App Setup
+## 4. Android Companion App Setup
 
-1. **Build or obtain the SimpleProtocolPlayer APK**:
-   See [android/README.md](../android/README.md) for compilation instructions.
-2. **Transfer to tablet**:
+Droid Link provides first-party, reproducibly buildable companion apps in the `android/` directory:
+
+1. **Build both companion APKs from source**:
    ```bash
-   adb push path/to/SimpleProtocolPlayer.apk /sdcard/Download/
+   cd android
+   ./gradlew assembleRelease
    ```
-3. **Install the APK**:
-   Open **File Manager** on your tablet, go to **Downloads**, and tap the APK to install.
-4. **Install Moreland companion APK**:
-   Build or download the APK from [Moreland releases](https://github.com/adiimanav/moreland) and install it on the tablet.
+2. **Install directly via ADB**:
+   ```bash
+   adb install -r display/build/outputs/apk/release/display-release.apk
+   adb install -r audio/build/outputs/apk/release/audio-release.apk
+   ```
+3. **Xiaomi / Redmi (MIUI & HyperOS) alternative**:
+   If "Install via USB" requires an account login, push to storage and install via File Manager:
+   ```bash
+   adb push display/build/outputs/apk/release/display-release.apk /sdcard/Download/
+   adb push audio/build/outputs/apk/release/audio-release.apk /sdcard/Download/
+   ```
+   Open **File Manager** on the tablet, navigate to **Downloads**, and tap each APK to install.
+   *(Legacy upstream apps `com.moreland.display` and `com.kaytat.simpleprotocolplayer` remain fully supported via automatic fallback).*
 
 ---
 

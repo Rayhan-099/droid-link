@@ -103,14 +103,14 @@ cp target/release/moreland ~/.local/bin/
 Droid Link provides first-party, reproducibly buildable companion apps in the `android/` directory:
 
 1. **Build both companion APKs from source**:
+   Use the automated build helper (auto-resolves JDK 17 and Android SDK):
    ```bash
-   cd android
-   ./gradlew assembleRelease
+   ./scripts/build-apk.sh
    ```
 2. **Install directly via ADB**:
    ```bash
-   adb install -r display/build/outputs/apk/release/display-release.apk
-   adb install -r audio/build/outputs/apk/release/audio-release.apk
+   adb install -r android/display/build/outputs/apk/release/display-release.apk
+   adb install -r android/audio/build/outputs/apk/release/audio-release.apk
    ```
 
 ### Xiaomi HyperOS & MIUI Specific Instructions

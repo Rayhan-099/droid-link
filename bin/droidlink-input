@@ -247,6 +247,10 @@ class UinputDevice:
             self.fd = None
 
 
+VALID_ACTIONS = {ACTION_DOWN, ACTION_MOVE, ACTION_UP, ACTION_CANCEL, ACTION_POINTER_DOWN, ACTION_POINTER_UP}
+VALID_TOOLS = {TOOL_FINGER, TOOL_STYLUS, TOOL_ERASER, TOOL_MOUSE}
+
+
 def parse_packet(data: bytes):
     if len(data) != PACKET_LEN:
         return None
@@ -255,14 +259,19 @@ def parse_packet(data: bytes):
     )
     if magic != MAGIC:
         return None
+    if action not in VALID_ACTIONS or tool not in VALID_TOOLS:
+        return None
+
+    # Sanitize and clamp values to valid ranges
     return {
         "action": action,
         "tool": tool,
-        "pointer_id": pointer_id,
-        "x": x,
-        "y": y,
-        "pressure": pressure,
-        "tilt_x": tilt_x,
+        "pointer_id": max(0, min(9, pointer_id)),
+        "x": max(0, min(65535, x)),
+        "y": max(0, min(65535, y)),
+        "pressure": max(0, min(65535, pressure)),
+        "tilt_x": max(-90, min(90, tilt_x)),
+        "tilt_y": max(-90, min(90, tilt_y)),
         "buttons": buttons,
     }
 
@@ -303,6 +312,11 @@ def main():
     while True:
         try:
             client, addr = server_sock.accept()
+            if addr[0] not in ("127.0.0.1", "::1"):
+                print(f"Rejected unauthorized non-loopback connection from {addr}", file=sys.stderr)
+                client.close()
+                continue
+
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             print(f"Touch client connected from {addr}")
 

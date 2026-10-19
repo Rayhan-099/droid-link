@@ -4,6 +4,18 @@ This guide covers common issues and resolutions when running DroidLink.
 
 ---
 
+## Quick Diagnostics: Run `tablet doctor` First
+
+Before manual troubleshooting, run DroidLink's automated diagnostics tool:
+
+```bash
+tablet doctor
+```
+
+This scans your kernel, VA-API drivers, GStreamer plugins, PipeWire audio sinks, uinput permissions, connected ADB devices, and installed APKs, providing actionable suggestions for any detected misconfigurations.
+
+---
+
 ## 1. Video / Display Issues
 
 ### Error: `streaming stopped, reason not-negotiated (-4)`

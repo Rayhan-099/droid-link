@@ -52,4 +52,9 @@ echo -n "Test 6: Installer --dry-run completes cleanly... "
 "${REPO_DIR}/scripts/install.sh" --dry-run >/dev/null 2>&1
 echo "PASS"
 
+# Test 7: Doctor diagnostic command runs cleanly
+echo -n "Test 7: 'tablet doctor' produces diagnostic report... "
+"${TABLET}" doctor >/dev/null 2>&1
+echo "PASS"
+
 echo "All CLI tests passed successfully!"

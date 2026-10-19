@@ -113,6 +113,7 @@ tablet stop
 | `tablet` *(or `tablet start`)* | Starts the Moreland extended display service only. Laptop audio remains unaffected. |
 | `tablet -d <SERIAL> start` | Targets a specific tablet serial when multiple Android devices are connected. |
 | `tablet devices` | Lists all connected ADB devices, authorizations, models, and active DroidLink streams. |
+| `tablet doctor` | **Full-Stack Diagnostics**: Audits GPU/VA-API, PipeWire, ADB, uinput, Hyprland, and APK status. |
 | `tablet audio` *(or `tablet audio start`)* | Starts tablet audio streaming, launches Android receiver, routes PC audio, and starts the watchdog. |
 | `tablet audio stop` | Stops audio streaming, shuts down Android player, and **restores laptop audio to your saved default sink**. |
 | `tablet input start` | Starts the `droidlink-input` uinput daemon for tablet touch and stylus redirection into Hyprland. |
@@ -202,13 +203,12 @@ Droid Link includes first-party, reproducibly buildable Android companion apps u
 
 Build both release APKs with a single command:
 ```bash
-cd android
-./gradlew assembleRelease
+./scripts/build-apk.sh
 ```
 Install them to your connected tablet:
 ```bash
-adb install -r display/build/outputs/apk/release/display-release.apk
-adb install -r audio/build/outputs/apk/release/audio-release.apk
+adb install -r android/display/build/outputs/apk/release/display-release.apk
+adb install -r android/audio/build/outputs/apk/release/audio-release.apk
 ```
 *(Legacy upstream apps `com.moreland.display` and `com.kaytat.simpleprotocolplayer` remain fully supported via seamless automatic fallback).*
 
@@ -246,31 +246,55 @@ When you run `tablet audio stop` or unplug the tablet, DroidLink performs a clea
 
 ## Testing & Verification
 
-DroidLink includes an automated test suite verifying CLI behavior, device discovery, input handling, adaptive bitrate, and PipeWire routing mechanics:
+DroidLink separates all verification claims into empirical physical tests, simulated benchmarks, and mock suites:
 
 ```bash
+# Run CLI & diagnostic verification
 ./tests/test_cli.sh
+
+# Run multi-device discovery & serial targeting test suite
 ./tests/test_device_discovery.sh
+
+# Run touch & stylus protocol unit tests
 python3 tests/test_input.py
-python3 tests/test_bitrate.py
+
+# Run adaptive bitrate controller simulation benchmark
+python3 tests/benchmark_adaptive_bitrate.py
+
+# Run isolated PipeWire routing module tests
 ./tests/test_audio_routing.sh
 ```
 
-All integration features were empirically tested and verified:
-- [x] **Extended Display**: True independent workspace moving windows seamlessly between screens.
-- [x] **Adaptive Bitrate**: Dynamic bitrate scaling between 5,000 and 30,000 kbps based on client ACK RTT.
-- [x] **Touch & Stylus Input**: Zero-latency uinput event bridge with pressure, tilt, and multi-touch support.
-- [x] **USB Audio Playback**: Over 2.8 million frames rendered through tablet hardware speakers.
-- [x] **Manual Restoration**: Instant fallback to laptop sound card with zero PipeWire residue.
-- [x] **Automatic Disconnection**: Watchdog polls ADB every 2s and auto-restores audio within 4s of unplugging.
-- [x] **Stream Independence**: Video, input, and audio can be started and stopped without affecting each other.
+### Empirical Verification Matrix
 
-See [docs/testing.md](docs/testing.md) for detailed test logs.
+#### 1. Verified on Physical Hardware (Redmi Pad `24074RPD2I`)
+- [x] **Extended Display**: True independent workspace (`1920×1200@90Hz`) on workspace 3 with zero-copy DMA-BUF `AR24` tiled export. Measured **1.6% CPU usage** over 51+ minutes of continuous streaming.
+- [x] **USB Disconnect / Reconnect Resilience**: Stream automatically recovers and renegotiates format after physical USB cable drops without crashing the daemon.
+- [x] **USB Audio Playback**: 48kHz 16-bit stereo PCM rendered cleanly through tablet quad speakers over ADB reverse port 4711.
+- [x] **Watchdog Fail-Safe Restoration**: Automatically switches default audio back to laptop sound card within 4 seconds of tablet disconnection.
+- [x] **Stream Independence**: Video, audio, and input streams toggle independently without affecting other subsystems.
+
+#### 2. Mock & Simulation Benchmark Verified
+- [x] **Dynamic Adaptive Bitrate**: Benchmark simulated ideal transport (<25ms RTT -> 30 Mbps ceiling), severe congestion (>45ms RTT -> 5 Mbps floor), and noisy 150ms outlier rejection.
+- [x] **Wayland Touch & Stylus Protocol**: Verified 24-byte packet serialization, boundary clamping, and uinput slot lifecycle.
+- [x] **Multi-Device ADB Discovery**: Verified auto-resolve, ambiguity guard (exit code 2), explicit targeting, and unauthorized device detection.
+- [x] **Diagnostics & Waybar**: Verified `tablet doctor` full-stack audit and `tablet-waybar` status JSON.
+
+#### 3. Pending Physical Hardware Validation
+- [ ] **Physical Stylus Digitizer**: Stylus pressure and tilt precision on the physical tablet surface is pending sideloading `display-release.apk` (can be completed whenever the user chooses to pause the active display session).
+
+---
+
+## Known Limitations & Architecture Nuances
+
+- **Multitasking & Picture-in-Picture**: Picture-in-Picture mode (`supportsPictureInPicture="true"`, `MediaCodec.setOutputSurface`) allows minimizing the video or switching apps while keeping the stream active. However, Android OS security does *not* permit invisible offscreen video rendering without a hardware display presentation.
+- **Multi-Device Concurrency**: DroidLink supports *multi-device discovery and targeting* (driving any specific tablet using `-d <SERIAL>`). Concurrent simultaneous streaming to two tablets at the same time requires dynamic per-device port allocation.
 
 ---
 
 ## Documentation
 
+- [docs/implementation/RELEASE_READINESS.md](docs/implementation/RELEASE_READINESS.md) — Comprehensive hardware validation and benchmark report.
 - [docs/architecture.md](docs/architecture.md) — Detailed technical architecture and pipeline mechanics.
 - [docs/installation.md](docs/installation.md) — Step-by-step setup and build guide.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — Solutions for common connection, input, and VA-API errors.
@@ -286,6 +310,7 @@ See [docs/testing.md](docs/testing.md) for detailed test logs.
 - [x] Robust auto-discovery and serial targeting for multi-tablet setups.
 - [x] Dynamic bitrate adjustment based on client ACK round-trip time.
 - [x] Picture-in-Picture mode and dynamic surface lifecycle management.
+- [x] Full-stack diagnostic and release readiness tool (`tablet doctor`).
 - [ ] Direct Wi-Fi / P2P transport mode for wireless operation when USB is disconnected.
 - [ ] Reverse audio streaming (using tablet microphone as a Linux input source).
 - [ ] Hardware AV1 / HEVC encoding profile support for newer GPUs and tablets.

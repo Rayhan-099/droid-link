@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify Shell Scripts (Syntax)
+        run: |
+          for f in bin/tablet bin/tablet-audio bin/tablet-audio-watchdog bin/droidlink-device bin/tablet-waybar scripts/install.sh scripts/uninstall.sh scripts/setup-uinput.sh scripts/build-apk.sh; do
+            bash -n "$f"
+          done
+
+      - name: Run Device Discovery Tests
+        run: bash tests/test_device_discovery.sh
+
+      - name: Run Input Protocol Tests
+        run: python3 tests/test_input.py
+
+      - name: Run Adaptive Bitrate Unit Tests
+        run: python3 tests/test_bitrate.py
+
+      - name: Run Adaptive Bitrate Simulation Benchmark
+        run: python3 tests/benchmark_adaptive_bitrate.py
+
+  android-build:
+    name: Build Android Companion Apps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Release APKs
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify Built APKs
+        run: |
+          test -f android/display/build/outputs/apk/release/display-release.apk
+          test -f android/audio/build/outputs/apk/release/audio-release.apk
+          echo "Verified display and audio release APK artifacts."

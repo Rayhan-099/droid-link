@@ -63,6 +63,33 @@ class TestInputProtocol(unittest.TestCase):
         )
         self.assertIsNone(droidlink_input.parse_packet(pkt))
 
+    def test_invalid_action_or_tool_rejected(self):
+        # Invalid action 99
+        pkt1 = struct.pack("<BBBBIIIhhBBBB", 0xD1, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        self.assertIsNone(droidlink_input.parse_packet(pkt1))
+
+        # Invalid tool 55
+        pkt2 = struct.pack("<BBBBIIIhhBBBB", 0xD1, 1, 55, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        self.assertIsNone(droidlink_input.parse_packet(pkt2))
+
+    def test_boundary_clamping(self):
+        # Coordinates and pressure beyond bounds
+        pkt = struct.pack(
+            "<BBBBIIIhhBBBB",
+            0xD1, 1, 0, 25,
+            70000, 80000, 99999,
+            120, -150,
+            1, 0, 0, 0
+        )
+        parsed = droidlink_input.parse_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["pointer_id"], 9)  # Clamped to max 9
+        self.assertEqual(parsed["x"], 65535)       # Clamped to 65535
+        self.assertEqual(parsed["y"], 65535)       # Clamped to 65535
+        self.assertEqual(parsed["pressure"], 65535)# Clamped to 65535
+        self.assertEqual(parsed["tilt_x"], 90)     # Clamped to 90
+        self.assertEqual(parsed["tilt_y"], -90)    # Clamped to -90
+
     def test_short_packet_rejected(self):
         self.assertIsNone(droidlink_input.parse_packet(b"\xD1\x01\x00"))
 

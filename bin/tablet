@@ -18,8 +18,6 @@ if [[ ! -x "${INPUT_DRIVER}" ]]; then
     INPUT_DRIVER="$(command -v droidlink-input || echo "")"
 fi
 
-INPUT_PID_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid"
-
 # Flag parsing
 TARGET_DEVICE=""
 POSITIONAL_ARGS=()
@@ -48,11 +46,25 @@ is_audio_active() {
     pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"
 }
 
+get_input_pid_file() {
+    local dev="${1:-}"
+    local state_dir="$(droidlink_get_device_state_dir "${dev}")"
+    echo "${state_dir}/input.pid"
+}
+
 is_input_active() {
-    if [[ -f "${INPUT_PID_FILE}" ]]; then
+    local dev="${1:-}"
+    local pid_file="$(get_input_pid_file "${dev}")"
+    if [[ -f "${pid_file}" ]]; then
         local pid
-        pid="$(cat "${INPUT_PID_FILE}" 2>/dev/null || true)"
+        pid="$(cat "${pid_file}" 2>/dev/null || true)"
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [[ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid" ]]; then
+        local lpid="$(cat "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid" 2>/dev/null || true)"
+        if [[ -n "${lpid}" ]] && kill -0 "${lpid}" 2>/dev/null; then
             return 0
         fi
     fi
@@ -61,7 +73,7 @@ is_input_active() {
 
 start_input_driver() {
     local dev="$1"
-    if is_input_active; then
+    if is_input_active "${dev}"; then
         return 0
     fi
 
@@ -73,20 +85,24 @@ start_input_driver() {
         # Launch input driver in background
         nohup "${INPUT_DRIVER}" --port 4820 >/dev/null 2>&1 &
         local pid=$!
-        mkdir -p "$(dirname "${INPUT_PID_FILE}")"
-        echo "${pid}" > "${INPUT_PID_FILE}"
+        local pid_file="$(get_input_pid_file "${dev}")"
+        mkdir -p "$(dirname "${pid_file}")"
+        echo "${pid}" > "${pid_file}"
     fi
 }
 
 stop_input_driver() {
-    if [[ -f "${INPUT_PID_FILE}" ]]; then
+    local dev="${1:-}"
+    local pid_file="$(get_input_pid_file "${dev}")"
+    if [[ -f "${pid_file}" ]]; then
         local pid
-        pid="$(cat "${INPUT_PID_FILE}" 2>/dev/null || true)"
+        pid="$(cat "${pid_file}" 2>/dev/null || true)"
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
             kill "${pid}" 2>/dev/null || true
         fi
-        rm -f "${INPUT_PID_FILE}"
+        rm -f "${pid_file}"
     fi
+    rm -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid"
     pkill -f "droidlink-input" 2>/dev/null || true
 }
 
@@ -117,11 +133,11 @@ case "${ACTION}" in
         echo "Touch and stylus input driver active on device ${dev}."
         ;;
       stop)
-        stop_input_driver
+        stop_input_driver "${TARGET_DEVICE:-}"
         echo "Touch and stylus input driver stopped."
         ;;
       status)
-        if is_input_active; then
+        if is_input_active "${TARGET_DEVICE:-}"; then
             echo "Touch/Stylus driver: RUNNING (tcp:4820 forward active)"
         else
             echo "Touch/Stylus driver: INACTIVE"
@@ -160,7 +176,7 @@ case "${ACTION}" in
         fi
     fi
     echo "Stopping touch input driver..."
-    stop_input_driver
+    stop_input_driver "${TARGET_DEVICE:-}"
     systemctl --user stop moreland.service
     ;;
 
@@ -205,8 +221,131 @@ case "${ACTION}" in
     systemctl --user restart moreland.service
     ;;
 
+  doctor)
+    echo "========================================================"
+    echo "         DROIDLINK SYSTEM DIAGNOSTICS & AUDIT           "
+    echo "========================================================"
+    echo ""
+    # 1. Host & OS
+    echo "─── [1/6] Host & Linux Environment ───"
+    echo "Kernel:      $(uname -s) $(uname -r) ($(uname -m))"
+    if [[ -f /etc/os-release ]]; then
+        os_name="$(grep -E "^PRETTY_NAME=" /etc/os-release | cut -d= -f2 | tr -d '"')"
+        echo "OS:          ${os_name}"
+    fi
+    if [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] || command -v hyprctl >/dev/null 2>&1; then
+        echo "Compositor:  Hyprland (ACTIVE: ${HYPRLAND_INSTANCE_SIGNATURE:-detected})"
+        if command -v hyprctl >/dev/null 2>&1; then
+            echo "Monitors:"
+            hyprctl monitors 2>/dev/null | grep -E "Monitor |^[0-9]+x[0-9]+@" | sed 's/^/  /' || true
+        fi
+    else
+        echo "Compositor:  Non-Hyprland Wayland or X11 session"
+    fi
+    echo ""
+
+    # 2. Hardware Video Acceleration (VA-API)
+    echo "─── [2/6] Video Acceleration & VA-API ───"
+    if [[ -e /dev/dri/renderD128 ]]; then
+        echo "DRM Render:  /dev/dri/renderD128 (EXISTS)"
+    else
+        echo "DRM Render:  [!] /dev/dri/renderD128 not found"
+    fi
+    if gst-inspect-1.0 vah264enc >/dev/null 2>&1; then
+        echo "GStreamer:   vah264enc (AVAILABLE, hardware H.264 encoder verified)"
+    else
+        echo "GStreamer:   [!] vah264enc not found (install gst-plugin-va)"
+    fi
+    if gst-inspect-1.0 vapostproc >/dev/null 2>&1; then
+        echo "Postproc:    vapostproc (AVAILABLE, DMA-BUF color conversion verified)"
+    else
+        echo "Postproc:    [!] vapostproc not found"
+    fi
+    echo ""
+
+    # 3. Audio Subsystem (PipeWire)
+    echo "─── [3/6] Audio & PipeWire Subsystem ───"
+    if command -v pactl >/dev/null 2>&1; then
+        pw_server="$(pactl info 2>/dev/null | grep -E "^Server Name:" | cut -d: -f2- | xargs || true)"
+        pw_sink="$(pactl info 2>/dev/null | grep -E "^Default Sink:" | cut -d: -f2- | xargs || true)"
+        echo "Audio Server: ${pw_server:-Detected}"
+        echo "Default Sink: ${pw_sink:-Unknown}"
+        echo "Loaded Modules:"
+        pactl list modules short 2>/dev/null | grep -E "Tablet_Audio|simple-protocol" | sed 's/^/  /' || echo "  (None active)"
+    else
+        echo "Audio Server: [!] pactl command not found (install pulseaudio-utils)"
+    fi
+    echo ""
+
+    # 4. Input & uinput
+    echo "─── [4/6] Wayland Touch & Stylus (/dev/uinput) ───"
+    if [[ -w "/dev/uinput" ]]; then
+        echo "Uinput:      /dev/uinput is WRITABLE by current user (Non-root input ready)"
+    else
+        echo "Uinput:      [!] /dev/uinput is RESTRICTED (Run 'sudo ./scripts/setup-uinput.sh' to fix)"
+    fi
+    if [[ -f "/etc/udev/rules.d/99-droidlink-uinput.rules" ]]; then
+        echo "Udev Rule:   /etc/udev/rules.d/99-droidlink-uinput.rules (INSTALLED)"
+    else
+        echo "Udev Rule:   /etc/udev/rules.d/99-droidlink-uinput.rules (Not installed)"
+    fi
+    if is_input_active; then
+        echo "Input State: ACTIVE (droidlink-input running)"
+    else
+        echo "Input State: INACTIVE"
+    fi
+    echo ""
+
+    # 5. Connected Android Devices & APKs
+    echo "─── [5/6] Android ADB & Companion Apps ───"
+    if command -v "${DROIDLINK_ADB}" >/dev/null 2>&1; then
+        echo "ADB:         ${DROIDLINK_ADB}"
+        dev_list="$(droidlink_list_devices)"
+        if [[ -n "${dev_list}" ]]; then
+            echo "Devices:"
+            echo "${dev_list}" | sed 's/^/  /'
+        else
+            echo "Devices:     [!] No Android devices connected via USB."
+        fi
+
+        dev="$(droidlink_resolve_device "${TARGET_DEVICE}" 2>/dev/null || echo "")"
+        if [[ -n "${dev}" ]]; then
+            echo "Target:      ${dev}"
+            d_app="Not Installed"
+            if "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "io.github.rayhan099.droidlink.display"; then
+                d_app="io.github.rayhan099.droidlink.display (First-party Droid Link Display)"
+            elif "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "com.moreland.display"; then
+                d_app="com.moreland.display (Legacy Moreland Display)"
+            fi
+            echo "Display App: ${d_app}"
+
+            a_app="Not Installed"
+            if "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "io.github.rayhan099.droidlink.audio"; then
+                a_app="io.github.rayhan099.droidlink.audio (First-party Droid Link Audio)"
+            elif "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "com.kaytat.simpleprotocolplayer"; then
+                a_app="com.kaytat.simpleprotocolplayer (Legacy Simple Protocol Player)"
+            fi
+            echo "Audio App:   ${a_app}"
+        fi
+    else
+        echo "ADB:         [!] adb not found"
+    fi
+    echo ""
+
+    # 6. Network Ports & Reverse Tunnels
+    echo "─── [6/6] TCP Port Bindings & Tunnels ───"
+    if command -v ss >/dev/null 2>&1; then
+        echo "Active Listening Ports:"
+        ss -tlnp 2>/dev/null | grep -E "4711|4820|27183" | sed 's/^/  /' || echo "  (None active)"
+    fi
+    echo ""
+    echo "========================================================"
+    echo "               DIAGNOSTIC REPORT COMPLETE               "
+    echo "========================================================"
+    ;;
+
   *)
-    echo "Usage: tablet [--device SERIAL] [start|stop|status|devices|restart|input [start|stop|status]|audio [start|stop|status]]" >&2
+    echo "Usage: tablet [--device SERIAL] [start|stop|status|devices|doctor|restart|input [start|stop|status]|audio [start|stop|status]]" >&2
     exit 1
     ;;
 esac

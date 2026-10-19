@@ -118,3 +118,8 @@ droidlink_state_dir() {
     mkdir -p "${dir}"
     echo "${dir}"
 }
+
+droidlink_get_device_state_dir() {
+    droidlink_state_dir "$@"
+}
+

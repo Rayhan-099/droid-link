@@ -6,8 +6,8 @@ package io.github.rayhan099.droidlink.display
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.net.LocalServerSocket
 import android.net.LocalSocket
-import android.net.LocalSocketAddress
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedInputStream
@@ -32,6 +32,7 @@ class VideoStream(private val listener: StreamListener? = null) {
 
     private val running = AtomicBoolean(true)
     private var worker: Thread? = null
+    private var serverSocket: LocalServerSocket? = null
 
     @Volatile
     private var currentSurface: Surface? = null
@@ -45,6 +46,9 @@ class VideoStream(private val listener: StreamListener? = null) {
 
     fun stop() {
         running.set(false)
+        try {
+            serverSocket?.close()
+        } catch (_: Exception) {}
         worker?.interrupt()
         worker = null
     }
@@ -64,35 +68,45 @@ class VideoStream(private val listener: StreamListener? = null) {
     private fun run() {
         while (running.get()) {
             try {
-                listener?.invoke(StreamState.CONNECTING, "Connecting to host daemon...")
-                connectAndStream()
-            } catch (_: InterruptedException) {
+                Log.i(TAG, "listening on localabstract:${Protocol.SOCKET_NAME}")
+                LocalServerSocket(Protocol.SOCKET_NAME).use { server ->
+                    serverSocket = server
+                    listener?.invoke(StreamState.CONNECTING, "Waiting for host connection...")
+                    while (running.get()) {
+                        val socket = server.accept()
+                        Log.i(TAG, "Host connected to localabstract:${Protocol.SOCKET_NAME}")
+                        try {
+                            handleSession(socket)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Session ended: ${e.message}")
+                            listener?.invoke(StreamState.ERROR, e.message ?: "Session ended")
+                        } finally {
+                            try {
+                                socket.close()
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
-                Log.w(TAG, "stream error: ${e.message}; retrying in 1s")
-                listener?.invoke(StreamState.ERROR, e.message ?: "Stream error")
+                if (!running.get()) break
+                Log.w(TAG, "Server socket error: ${e.message}; retrying in 500ms")
+                listener?.invoke(StreamState.ERROR, e.message ?: "Socket error")
                 try {
-                    Thread.sleep(1000)
+                    Thread.sleep(500)
                 } catch (_: InterruptedException) {
                     break
                 }
+            } finally {
+                serverSocket = null
             }
         }
         listener?.invoke(StreamState.DISCONNECTED, null)
     }
 
-    private fun connectAndStream() {
-        val socket = LocalSocket()
-        val addr = LocalSocketAddress(
-            Protocol.SOCKET_NAME,
-            LocalSocketAddress.Namespace.ABSTRACT,
-        )
-
-        Log.i(TAG, "connecting to abstract socket ${Protocol.SOCKET_NAME}…")
-        socket.connect(addr)
+    private fun handleSession(socket: LocalSocket) {
         socket.soTimeout = 5000
-        Log.i(TAG, "connected to host daemon")
-
         val input = DataInputStream(BufferedInputStream(socket.inputStream, 1024 * 1024))
         val output = DataOutputStream(socket.outputStream)
 
@@ -111,6 +125,9 @@ class VideoStream(private val listener: StreamListener? = null) {
             setInteger(MediaFormat.KEY_FRAME_RATE, header.framerate)
             setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
+        try {
+            format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
+        } catch (_: Exception) {}
 
         val codec = MediaCodec.createDecoderByType(header.mime)
         codec.configure(format, surface, null, 0)
@@ -163,9 +180,6 @@ class VideoStream(private val listener: StreamListener? = null) {
                 codec.stop()
             } catch (_: Exception) {}
             codec.release()
-            try {
-                socket.close()
-            } catch (_: Exception) {}
         }
     }
 

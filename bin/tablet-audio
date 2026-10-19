@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# DroidLink — Tablet Audio Stream & Automatic Routing Controller
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+# License: MIT
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WATCHDOG_SCRIPT="${SCRIPT_DIR}/tablet-audio-watchdog"
+if [[ ! -x "${WATCHDOG_SCRIPT}" ]]; then
+    WATCHDOG_SCRIPT="$(command -v tablet-audio-watchdog || echo "")"
+fi
+
+ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
+STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+SAVED_SINK_FILE="${STATE_DIR}/saved_sink"
+NULL_MOD_FILE="${STATE_DIR}/null_mod"
+TCP_MOD_FILE="${STATE_DIR}/tcp_mod"
+WATCHDOG_PID_FILE="${STATE_DIR}/watchdog.pid"
+AUDIO_PORT="${DROIDLINK_PORT:-4711}"
+SAMPLE_RATE="${DROIDLINK_RATE:-48000}"
+
+mkdir -p "${STATE_DIR}"
+
+get_device_serial() {
+    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
+        echo "${DROIDLINK_SERIAL}"
+        return
+    fi
+    if [[ -f "${STATE_DIR}/device_serial" ]]; then
+        local configured
+        configured="$(cat "${STATE_DIR}/device_serial" 2>/dev/null || true)"
+        if [[ -n "${configured}" ]]; then
+            echo "${configured}"
+            return
+        fi
+    fi
+    local devices
+    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
+    local count
+    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
+    if [[ "${count}" -ge 1 ]]; then
+        echo "${devices}" | head -n 1
+    else
+        echo ""
+    fi
+}
+
+DEVICE_SERIAL="$(get_device_serial)"
+
+is_device_connected() {
+    [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" devices 2>/dev/null | grep -E "^${DEVICE_SERIAL}\s+device" >/dev/null 2>&1
+}
+
+is_apk_installed() {
+    [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" -s "${DEVICE_SERIAL}" shell pm list packages 2>/dev/null | grep -q "com.kaytat.simpleprotocolplayer"
+}
+
+is_audio_active() {
+    pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"
+}
+
+get_fallback_sink() {
+    # Check if a USB or built-in audio sink is available
+    local fb
+    fb=$(pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -v "^Tablet_Audio" | head -n 1)
+    echo "${fb}"
+}
+
+start_audio() {
+    if is_audio_active; then
+        echo "Tablet audio is already running."
+        exit 0
+    fi
+
+    if [[ -z "${DEVICE_SERIAL}" ]] || ! is_device_connected; then
+        echo "Error: No authorized Android device detected over ADB." >&2
+        echo "Please connect your tablet via USB with USB debugging enabled." >&2
+        exit 1
+    fi
+
+    if ! is_apk_installed; then
+        echo "Error: SimpleProtocolPlayer app (com.kaytat.simpleprotocolplayer) is not installed on device ${DEVICE_SERIAL}." >&2
+        echo "Please install SimpleProtocolPlayer on the tablet before starting audio." >&2
+        exit 1
+    fi
+
+    # 1. Record current default sink before switching
+    local cur_sink
+    cur_sink=$(pactl get-default-sink 2>/dev/null || true)
+    if [[ -n "${cur_sink}" && "${cur_sink}" != "Tablet_Audio" ]]; then
+        echo "${cur_sink}" > "${SAVED_SINK_FILE}"
+        echo "Saved current default sink: ${cur_sink}"
+    fi
+
+    # 2. Create PipeWire virtual null-sink
+    echo "Creating virtual audio sink 'Tablet_Audio'..."
+    local null_mod
+    null_mod=$(pactl load-module module-null-sink sink_name=Tablet_Audio sink_properties=device.description="Redmi_Tablet_Audio")
+    echo "${null_mod}" > "${NULL_MOD_FILE}"
+
+    # 3. Create module-simple-protocol-tcp on Tablet_Audio.monitor
+    echo "Creating PipeWire TCP audio stream on port ${AUDIO_PORT} (${SAMPLE_RATE}Hz stereo)..."
+    local tcp_mod
+    tcp_mod=$(pactl load-module module-simple-protocol-tcp source=Tablet_Audio.monitor rate=${SAMPLE_RATE} format=s16le channels=2 record=true port=${AUDIO_PORT})
+    echo "${tcp_mod}" > "${TCP_MOD_FILE}"
+
+    # 4. Configure ADB reverse port forwarding over USB
+    echo "Configuring ADB reverse port forwarding (USB tcp:${AUDIO_PORT} -> host tcp:${AUDIO_PORT})..."
+    "${ADB}" -s "${DEVICE_SERIAL}" reverse tcp:${AUDIO_PORT} tcp:${AUDIO_PORT}
+
+    # 5. Start Android audio receiver service
+    echo "Starting audio receiver service on tablet..."
+    "${ADB}" -s "${DEVICE_SERIAL}" shell am start-foreground-service \
+        -a com.kaytat.simpleprotocolplayer.action.PLAY \
+        --es ip_addr "127.0.0.1" \
+        --ei audio_port ${AUDIO_PORT} \
+        --ei sample_rate ${SAMPLE_RATE} \
+        --ez stereo true \
+        --ez retry true \
+        --ez use_performance_mode true \
+        --ez use_min_buffer true \
+        com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || {
+            "${ADB}" -s "${DEVICE_SERIAL}" shell am start-service \
+                -a com.kaytat.simpleprotocolplayer.action.PLAY \
+                --es ip_addr "127.0.0.1" \
+                --ei audio_port ${AUDIO_PORT} \
+                --ei sample_rate ${SAMPLE_RATE} \
+                --ez stereo true \
+                --ez retry true \
+                --ez use_performance_mode true \
+                --ez use_min_buffer true \
+                com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || true
+        }
+
+    # 6. Route system audio to Tablet_Audio
+    echo "Routing system audio to Tablet_Audio..."
+    pactl set-default-sink Tablet_Audio
+
+    # Move active playback streams to Tablet_Audio
+    local input_id
+    for input_id in $(pactl list short sink-inputs 2>/dev/null | awk '{print $1}'); do
+        pactl move-sink-input "${input_id}" Tablet_Audio 2>/dev/null || true
+    done
+
+    # 7. Start background disconnect watchdog
+    if [[ -n "${WATCHDOG_SCRIPT}" && -x "${WATCHDOG_SCRIPT}" ]]; then
+        (setsid "${WATCHDOG_SCRIPT}" >> "${STATE_DIR}/watchdog.log" 2>&1 &)
+        sleep 0.5
+        local wd_pid
+        wd_pid=$(pgrep -f "tablet-audio-watchdog" | tail -n 1 || true)
+        if [[ -n "${wd_pid}" ]]; then
+            echo "${wd_pid}" > "${WATCHDOG_PID_FILE}"
+        fi
+    fi
+
+    echo "Tablet audio successfully connected and routed over USB."
+}
+
+stop_audio() {
+    echo "Stopping tablet audio streaming..."
+
+    # 1. Terminate watchdog
+    if [[ -f "${WATCHDOG_PID_FILE}" ]]; then
+        local wd_pid
+        wd_pid=$(cat "${WATCHDOG_PID_FILE}" 2>/dev/null || true)
+        if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
+            kill "${wd_pid}" 2>/dev/null || true
+        fi
+        rm -f "${WATCHDOG_PID_FILE}"
+    fi
+
+    # 2. Tell Android player service to stop
+    if is_device_connected; then
+        "${ADB}" -s "${DEVICE_SERIAL}" shell am start-service \
+            -a com.kaytat.simpleprotocolplayer.action.STOP \
+            com.kaytat.simpleprotocolplayer/.MusicService >/dev/null 2>&1 || true
+        "${ADB}" -s "${DEVICE_SERIAL}" reverse --remove tcp:${AUDIO_PORT} >/dev/null 2>&1 || true
+    fi
+
+    # 3. Determine and restore prior audio sink
+    local restore_sink=""
+    if [[ -f "${SAVED_SINK_FILE}" ]]; then
+        local saved
+        saved=$(cat "${SAVED_SINK_FILE}" 2>/dev/null || true)
+        if [[ -n "${saved}" ]] && pactl list short sinks 2>/dev/null | grep -q "${saved}"; then
+            restore_sink="${saved}"
+        fi
+    fi
+
+    if [[ -z "${restore_sink}" ]]; then
+        restore_sink=$(get_fallback_sink)
+    fi
+
+    if [[ -n "${restore_sink}" ]]; then
+        echo "Restoring default audio sink to: ${restore_sink}"
+        pactl set-default-sink "${restore_sink}" 2>/dev/null || true
+        for input_id in $(pactl list short sink-inputs 2>/dev/null | awk '{print $1}'); do
+            pactl move-sink-input "${input_id}" "${restore_sink}" 2>/dev/null || true
+        done
+    fi
+
+    # 4. Unload PipeWire modules cleanly
+    if [[ -f "${TCP_MOD_FILE}" ]]; then
+        local tcp_mod
+        tcp_mod=$(cat "${TCP_MOD_FILE}" 2>/dev/null || true)
+        if [[ -n "${tcp_mod}" ]]; then
+            pactl unload-module "${tcp_mod}" 2>/dev/null || true
+        fi
+        rm -f "${TCP_MOD_FILE}"
+    fi
+
+    if [[ -f "${NULL_MOD_FILE}" ]]; then
+        local null_mod
+        null_mod=$(cat "${NULL_MOD_FILE}" 2>/dev/null || true)
+        if [[ -n "${null_mod}" ]]; then
+            pactl unload-module "${null_mod}" 2>/dev/null || true
+        fi
+        rm -f "${NULL_MOD_FILE}"
+    fi
+
+    # Cleanup any lingering Tablet_Audio modules
+    for mod_id in $(pactl list short modules 2>/dev/null | grep -E "(Tablet_Audio|simple-protocol-tcp.*${AUDIO_PORT})" | awk '{print $1}'); do
+        pactl unload-module "${mod_id}" 2>/dev/null || true
+    done
+
+    rm -f "${SAVED_SINK_FILE}"
+    echo "Tablet audio stopped and laptop audio restored."
+}
+
+status_audio() {
+    echo "=== Tablet Audio Status ==="
+    if is_audio_active; then
+        echo "Audio stream: ACTIVE (routed to Tablet_Audio)"
+        if ss -tln 2>/dev/null | grep -q ":${AUDIO_PORT} "; then
+            echo "TCP sender: LISTENING on port ${AUDIO_PORT}"
+        else
+            echo "TCP sender: NOT listening"
+        fi
+        if [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" reverse --list 2>/dev/null | grep -q "tcp:${AUDIO_PORT}"; then
+            echo "ADB USB forward: ACTIVE (tcp:${AUDIO_PORT} -> tcp:${AUDIO_PORT})"
+        else
+            echo "ADB USB forward: INACTIVE"
+        fi
+        if [[ -f "${WATCHDOG_PID_FILE}" ]]; then
+            local wd_pid
+            wd_pid=$(cat "${WATCHDOG_PID_FILE}" 2>/dev/null || true)
+            if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
+                echo "Watchdog monitor: RUNNING (PID ${wd_pid})"
+            else
+                echo "Watchdog monitor: DEAD"
+            fi
+        fi
+    else
+        echo "Audio stream: INACTIVE"
+    fi
+    echo "Current default sink: $(pactl get-default-sink 2>/dev/null || echo 'unknown')"
+}
+
+case "${1:-status}" in
+    start)
+        start_audio
+        ;;
+    stop)
+        stop_audio
+        ;;
+    status)
+        status_audio
+        ;;
+    *)
+        echo "Usage: tablet-audio [start|stop|status]" >&2
+        exit 1
+        ;;
+esac

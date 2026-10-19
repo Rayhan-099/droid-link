@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# DroidLink — Unified CLI for Android Tablet Extended Display and Audio on Linux
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+# License: MIT
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TABLET_AUDIO="${SCRIPT_DIR}/tablet-audio"
+
+# If not in script dir, look in PATH
+if [[ ! -x "${TABLET_AUDIO}" ]]; then
+    TABLET_AUDIO="$(command -v tablet-audio || echo "")"
+fi
+
+# Locate ADB
+ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
+
+# Resolve target Android device serial
+get_device_serial() {
+    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
+        echo "${DROIDLINK_SERIAL}"
+        return
+    fi
+    local state_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+    if [[ -f "${state_dir}/device_serial" ]]; then
+        local configured
+        configured="$(cat "${state_dir}/device_serial" 2>/dev/null || true)"
+        if [[ -n "${configured}" ]]; then
+            echo "${configured}"
+            return
+        fi
+    fi
+    # Auto-detect if single device is authorized
+    local devices
+    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
+    local count
+    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
+    if [[ "${count}" -eq 1 ]]; then
+        echo "${devices}" | tr -d '[:space:]'
+    elif [[ "${count}" -gt 1 ]]; then
+        echo "${devices}" | head -n 1
+    else
+        echo ""
+    fi
+}
+
+is_audio_active() {
+    pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"
+}
+
+case "${1:-start}" in
+  start)
+    systemctl --user start moreland.service
+    ;;
+  audio)
+    if [[ -z "${TABLET_AUDIO}" || ! -x "${TABLET_AUDIO}" ]]; then
+        echo "Error: tablet-audio helper script not found or not executable." >&2
+        exit 1
+    fi
+    case "${2:-start}" in
+      start)
+        "${TABLET_AUDIO}" start
+        ;;
+      stop)
+        "${TABLET_AUDIO}" stop
+        ;;
+      status)
+        "${TABLET_AUDIO}" status
+        ;;
+      *)
+        echo "Usage: tablet audio [start|stop|status]" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  stop)
+    if is_audio_active; then
+        echo "Stopping active tablet audio stream..."
+        if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
+            "${TABLET_AUDIO}" stop
+        fi
+    fi
+    systemctl --user stop moreland.service
+    ;;
+  status)
+    echo "=== Moreland Display Service ==="
+    systemctl --user status moreland.service --no-pager || true
+    echo ""
+    echo "=== Tablet USB Connection ==="
+    dev="$(get_device_serial)"
+    if [[ -n "${dev}" ]] && "${ADB}" devices 2>/dev/null | grep -E "^${dev}\s+device" >/dev/null 2>&1; then
+        echo "Device: ${dev} (AUTHORIZED & CONNECTED)"
+    elif [[ -n "${dev}" ]]; then
+        echo "Device: ${dev} (CONFIGURED, BUT NOT CONNECTED OR UNAUTHORIZED)"
+    else
+        echo "Device: No authorized ADB device detected"
+    fi
+    echo ""
+    if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
+        "${TABLET_AUDIO}" status
+    else
+        echo "Tablet audio helper not found."
+    fi
+    ;;
+  restart)
+    systemctl --user restart moreland.service
+    ;;
+  *)
+    echo "Usage: tablet [start|stop|status|restart|audio [start|stop|status]]" >&2
+    exit 1
+    ;;
+esac

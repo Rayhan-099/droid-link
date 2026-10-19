@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# DroidLink — Background Disconnect Watchdog
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+# License: MIT
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TABLET_AUDIO="${SCRIPT_DIR}/tablet-audio"
+if [[ ! -x "${TABLET_AUDIO}" ]]; then
+    TABLET_AUDIO="$(command -v tablet-audio || echo "")"
+fi
+
+ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
+STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+LOG_FILE="${STATE_DIR}/watchdog.log"
+
+get_device_serial() {
+    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
+        echo "${DROIDLINK_SERIAL}"
+        return
+    fi
+    if [[ -f "${STATE_DIR}/device_serial" ]]; then
+        local configured
+        configured="$(cat "${STATE_DIR}/device_serial" 2>/dev/null || true)"
+        if [[ -n "${configured}" ]]; then
+            echo "${configured}"
+            return
+        fi
+    fi
+    local devices
+    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
+    local count
+    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
+    if [[ "${count}" -ge 1 ]]; then
+        echo "${devices}" | head -n 1
+    else
+        echo ""
+    fi
+}
+
+DEVICE_SERIAL="$(get_device_serial)"
+
+echo "$(date -Iseconds): Watchdog started (PID $$) monitoring device ${DEVICE_SERIAL:-unknown}" >> "${LOG_FILE}"
+
+consecutive_failures=0
+
+while true; do
+    sleep 2
+
+    # If device was known, verify it remains connected
+    if [[ -n "${DEVICE_SERIAL}" ]]; then
+        if "${ADB}" devices 2>/dev/null | grep -E "^${DEVICE_SERIAL}\s+device" >/dev/null 2>&1; then
+            consecutive_failures=0
+        else
+            consecutive_failures=$((consecutive_failures + 1))
+            echo "$(date -Iseconds): Device ${DEVICE_SERIAL} not seen (count: ${consecutive_failures})" >> "${LOG_FILE}"
+            if [[ "${consecutive_failures}" -ge 2 ]]; then
+                echo "$(date -Iseconds): Device disconnected. Triggering audio stop & restore..." >> "${LOG_FILE}"
+                if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
+                    "${TABLET_AUDIO}" stop >> "${LOG_FILE}" 2>&1 || true
+                fi
+                exit 0
+            fi
+        fi
+    fi
+
+    # Check if audio sink is still active; if not, watchdog exits cleanly
+    if ! pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"; then
+        echo "$(date -Iseconds): Tablet_Audio sink inactive. Watchdog exiting cleanly." >> "${LOG_FILE}"
+        exit 0
+    fi
+done

@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Backups and editor artifacts
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Android build outputs & Keystores (NEVER COMMIT SECRETS)
+*.keystore
+*.jks
+*.apk
+*.aab
+build/
+.gradle/
+local.properties
+
+# DroidLink runtime state
+.config/
+watchdog.log
+saved_sink
+null_mod
+tcp_mod
+watchdog.pid
+device_serial

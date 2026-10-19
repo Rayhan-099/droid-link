@@ -1,0 +1,307 @@
+diff --git a/crates/capture/src/bin/capture_probe.rs b/crates/capture/src/bin/capture_probe.rs
+index a8cf6a5..e4192d5 100644
+--- a/crates/capture/src/bin/capture_probe.rs
++++ b/crates/capture/src/bin/capture_probe.rs
+@@ -86,6 +86,7 @@ fn main() -> Result<()> {
+         } else {
+             FALLBACK_MODIFIERS.to_vec()
+         },
++        allowed_formats: Vec::new(),
+         paint_cursor: false,
+     };
+     let mut capture = Capture::new(&target, &config)?;
+diff --git a/crates/capture/src/lib.rs b/crates/capture/src/lib.rs
+index 617832d..91f79e8 100644
+--- a/crates/capture/src/lib.rs
++++ b/crates/capture/src/lib.rs
+@@ -22,6 +22,8 @@ pub const VIRTUAL_OUTPUT_NAME: &str = "moreland";
+ 
+ /// `XR24` — opaque 8-bit BGRX, the format captured from the virtual output.
+ pub const XR24: u32 = u32::from_le_bytes(*b"XR24");
++/// `AR24` — 8-bit BGRA (DRM_FORMAT_ARGB8888).
++pub const AR24: u32 = u32::from_le_bytes(*b"AR24");
+ 
+ /// Fallback modifiers when the encoder cannot be probed.
+ ///
+diff --git a/crates/capture/src/session.rs b/crates/capture/src/session.rs
+index e1a5460..e0aba9b 100644
+--- a/crates/capture/src/session.rs
++++ b/crates/capture/src/session.rs
+@@ -52,6 +52,10 @@ pub struct CaptureConfig {
+     /// compressed surfaces. The result is not an error but a silent fallback to
+     /// a CPU copy, which defeats the entire point of the DMA-BUF path.
+     pub allowed_modifiers: Vec<u64>,
++    /// Explicit DRM (fourcc, modifiers) pairs the consumer can accept.
++    /// If non-empty, this takes precedence over `allowed_modifiers` and allows
++    /// multi-format negotiation (e.g. XR24 vs AR24).
++    pub allowed_formats: Vec<(u32, Vec<u64>)>,
+     /// Ask the compositor to composite the mouse cursor into captured frames.
+     pub paint_cursor: bool,
+ }
+@@ -62,6 +66,7 @@ impl Default for CaptureConfig {
+             mode: BufferMode::Dmabuf,
+             pool_size: 2,
+             allowed_modifiers: Vec::new(),
++            allowed_formats: Vec::new(),
+             paint_cursor: false,
+         }
+     }
+@@ -318,6 +323,7 @@ pub struct Capture {
+     // buffer constraints mid-session.
+     pool_size: usize,
+     allowed_modifiers: Vec<u64>,
++    allowed_formats: Vec<(u32, Vec<u64>)>,
+     geometry_changed: bool,
+     shm: wl_shm::WlShm,
+     dmabuf: Option<ZwpLinuxDmabufV1>,
+@@ -415,6 +421,7 @@ impl Capture {
+             device_path: None,
+             pool_size,
+             allowed_modifiers: config.allowed_modifiers.clone(),
++            allowed_formats: config.allowed_formats.clone(),
+             geometry_changed: false,
+             shm,
+             dmabuf: dmabuf_global,
+@@ -470,8 +477,11 @@ impl Capture {
+                     .dmabuf
+                     .as_ref()
+                     .context("DMA-BUF mode without a linux-dmabuf global")?;
+-                let (fourcc, modifiers) =
+-                    pick_dmabuf_format(&caps.dmabuf_formats, &self.allowed_modifiers)?;
++                let (fourcc, modifiers) = pick_dmabuf_format(
++                    &caps.dmabuf_formats,
++                    &self.allowed_modifiers,
++                    &self.allowed_formats,
++                )?;
+                 format = fourcc;
+ 
+                 let dev = caps
+@@ -708,32 +718,67 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
+ /// substitute something the consumer cannot read.
+ fn pick_dmabuf_format(
+     formats: &[(u32, Vec<u64>)],
+-    allowed: &[u64],
++    allowed_modifiers: &[u64],
++    allowed_formats: &[(u32, Vec<u64>)],
+ ) -> Result<(u32, Vec<u64>)> {
+     const XR24: u32 = fourcc(b"XR24");
+     const AR24: u32 = fourcc(b"AR24");
++    const XB24: u32 = fourcc(b"XB24");
++    const AB24: u32 = fourcc(b"AB24");
++
++    // When the consumer provides explicit (format, modifiers) support:
++    if !allowed_formats.is_empty() {
++        for wanted in [XR24, AR24, XB24, AB24] {
++            let Some((_, offered_mods)) = formats.iter().find(|(f, _)| *f == wanted) else {
++                continue;
++            };
++            let Some((_, consumer_mods)) = allowed_formats.iter().find(|(f, _)| *f == wanted) else {
++                continue;
++            };
++            if let Some(m) = consumer_mods.iter().find(|m| offered_mods.contains(m)) {
++                tracing::info!(
++                    "Negotiated DMA-BUF format {} with modifier 0x{:016x}",
++                    fourcc_name(wanted),
++                    m
++                );
++                return Ok((wanted, vec![*m]));
++            }
++        }
++    }
+ 
++    // Fallback: legacy allowed_modifiers path
+     for wanted in [XR24, AR24] {
+         let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) else {
+             continue;
+         };
+-        if allowed.is_empty() {
++        if allowed_modifiers.is_empty() {
+             return Ok((*fourcc, offered.clone()));
+         }
+-        if let Some(modifier) = allowed.iter().find(|m| offered.contains(m)) {
++        if let Some(modifier) = allowed_modifiers.iter().find(|m| offered.contains(m)) {
+             return Ok((*fourcc, vec![*modifier]));
+         }
+     }
+ 
+-    if allowed.is_empty() {
++    if allowed_modifiers.is_empty() && allowed_formats.is_empty() {
+         bail!("no supported DMA-BUF format offered");
+     }
+     bail!(
+-        "compositor and consumer share no DMA-BUF modifier \
+-         (consumer accepts {allowed:02x?}, compositor offers {:02x?})",
++        "compositor and consumer share no DMA-BUF format/modifier \
++         (consumer accepts formats {:?}, modifiers {:02x?}, compositor offers {:?})",
++        allowed_formats
++            .iter()
++            .map(|(f, m)| (
++                fourcc_name(*f),
++                m.iter().map(|x| format!("0x{:016x}", x)).collect::<Vec<_>>()
++            ))
++            .collect::<Vec<_>>(),
++        allowed_modifiers,
+         formats
+             .iter()
+-            .map(|(f, m)| (fourcc_name(*f), m))
++            .map(|(f, m)| (
++                fourcc_name(*f),
++                m.iter().map(|x| format!("0x{:016x}", x)).collect::<Vec<_>>()
++            ))
+             .collect::<Vec<_>>()
+     )
+ }
+diff --git a/crates/daemon/src/session.rs b/crates/daemon/src/session.rs
+index 33a6c7f..096ff8f 100644
+--- a/crates/daemon/src/session.rs
++++ b/crates/daemon/src/session.rs
+@@ -148,16 +148,17 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+     std::thread::sleep(Duration::from_millis(2500));
+ 
+     // Probe what this machine's encoder can actually import rather than
+-    // assuming; the accepted modifier set is GPU-vendor specific.
+-    let allowed_modifiers = encoder::supported_modifiers(capture::XR24);
+-    tracing::debug!("encoder accepts modifiers {allowed_modifiers:02x?}");
++    // assuming; the accepted format and modifier set is GPU-vendor specific.
++    let allowed_formats = encoder::supported_dmabuf_formats();
++    tracing::debug!("encoder accepts formats {allowed_formats:02x?}");
+ 
+     let mut capture = Capture::new(
+         output.name(),
+         &CaptureConfig {
+             mode: BufferMode::Dmabuf,
+             pool_size: 3,
+-            allowed_modifiers,
++            allowed_modifiers: Vec::new(),
++            allowed_formats,
+             paint_cursor: config.paint_cursor,
+         },
+     )?;
+diff --git a/crates/encoder/src/bin/encode_probe.rs b/crates/encoder/src/bin/encode_probe.rs
+index c13bb24..f98bf5e 100644
+--- a/crates/encoder/src/bin/encode_probe.rs
++++ b/crates/encoder/src/bin/encode_probe.rs
+@@ -48,7 +48,8 @@ fn main() -> Result<()> {
+     let capture_config = CaptureConfig {
+         mode: BufferMode::Dmabuf,
+         pool_size: 3,
+-        allowed_modifiers: encoder::supported_modifiers(capture::XR24),
++        allowed_modifiers: Vec::new(),
++        allowed_formats: encoder::supported_dmabuf_formats(),
+         paint_cursor: false,
+     };
+     let mut capture = Capture::new(&output, &capture_config)?;
+diff --git a/crates/encoder/src/lib.rs b/crates/encoder/src/lib.rs
+index 2137852..6b80028 100644
+--- a/crates/encoder/src/lib.rs
++++ b/crates/encoder/src/lib.rs
+@@ -23,19 +23,10 @@ use gstreamer_video::{VideoFormat, VideoFrameFlags, VideoMeta};
+ use std::os::fd::BorrowedFd;
+ use std::time::Duration;
+ 
+-/// DRM format modifiers the VA encoder chain can import for `fourcc`, probed
+-/// from `vapostproc`'s advertised `memory:DMABuf` sink caps.
+-///
+-/// This must be probed, never hardcoded. Compositors offer modifiers the
+-/// encoder cannot read — on AMD, DCC-compressed tilings — and GBM will happily
+-/// prefer one. The result is not an error but a silent fallback to a CPU copy,
+-/// which defeats the whole zero-copy pipeline. The accepted set is also
+-/// vendor-specific, so a hardcoded value works on exactly one machine.
+-///
+-/// LINEAR is appended as a universal fallback.
+-pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
+-    let wanted = fourcc_name(fourcc);
+-    let mut modifiers = Vec::new();
++/// Probe all DRM (format, modifiers) pairs the VA encoder chain can import,
++/// discovered from `vapostproc`'s advertised `memory:DMABuf` sink caps.
++pub fn supported_dmabuf_formats() -> Vec<(u32, Vec<u64>)> {
++    let mut result: Vec<(u32, Vec<u64>)> = Vec::new();
+ 
+     if gst::init().is_ok() {
+         if let Some(factory) = gst::ElementFactory::find("vapostproc") {
+@@ -51,51 +42,64 @@ pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
+                     let Ok(value) = structure.value("drm-format") else {
+                         continue;
+                     };
+-                    collect_modifiers(&value, &wanted, &mut modifiers);
++                    collect_all_drm_formats(&value, &mut result);
+                 }
+             }
+         }
+     }
+ 
+-    if !modifiers.contains(&0) {
+-        modifiers.push(0); // DRM_FORMAT_MOD_LINEAR
+-    }
+-    modifiers
++    result
++}
++
++/// DRM format modifiers the VA encoder chain can import for `fourcc`.
++pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
++    supported_dmabuf_formats()
++        .into_iter()
++        .find(|(f, _)| *f == fourcc)
++        .map(|(_, m)| m)
++        .unwrap_or_default()
+ }
+ 
+-/// `drm-format` is either a single string or a list of `FOURCC:0xMODIFIER`.
+-fn collect_modifiers(value: &gst::glib::Value, wanted: &str, out: &mut Vec<u64>) {
++fn collect_all_drm_formats(value: &gst::glib::Value, out: &mut Vec<(u32, Vec<u64>)>) {
+     if let Ok(text) = value.get::<String>() {
+-        if let Some(modifier) = parse_drm_format(&text, wanted) {
+-            if !out.contains(&modifier) {
+-                out.push(modifier);
+-            }
++        if let Some((fourcc, modifier)) = parse_any_drm_format(&text) {
++            add_or_insert_modifier(out, fourcc, modifier);
+         }
+         return;
+     }
+     if let Ok(list) = value.get::<gst::List>() {
+         for item in list.iter() {
+-            collect_modifiers(item, wanted, out);
++            collect_all_drm_formats(item, out);
+         }
+     }
+ }
+ 
+-fn parse_drm_format(text: &str, wanted: &str) -> Option<u64> {
++fn parse_any_drm_format(text: &str) -> Option<(u32, u64)> {
+     let text = text.trim();
+-    let (fourcc, modifier) = match text.split_once(':') {
+-        Some((f, m)) => (f, m),
+-        // A bare fourcc with no modifier means linear.
++    let (fourcc_str, modifier_str) = match text.split_once(':') {
++        Some((f, m)) => (f.trim(), m.trim()),
+         None => (text, "0"),
+     };
+-    if fourcc.trim() != wanted {
++    let bytes = fourcc_str.as_bytes();
++    if bytes.len() != 4 {
+         return None;
+     }
+-    let modifier = modifier.trim();
+-    let parsed = modifier
++    let fourcc = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
++    let parsed_mod = modifier_str
+         .strip_prefix("0x")
+         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+-        .or_else(|| modifier.parse::<u64>().ok())?;
+-    Some(parsed)
++        .or_else(|| modifier_str.parse::<u64>().ok())?;
++    Some((fourcc, parsed_mod))
++}
++
++fn add_or_insert_modifier(out: &mut Vec<(u32, Vec<u64>)>, fourcc: u32, modifier: u64) {
++    if let Some((_, mods)) = out.iter_mut().find(|(f, _)| *f == fourcc) {
++        if !mods.contains(&modifier) {
++            mods.push(modifier);
++        }
++    } else {
++        out.push((fourcc, vec![modifier]));
++    }
+ }
+ 
+ pub struct EncoderConfig {

@@ -6,40 +6,39 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/droidlink-device"
+
 TABLET_AUDIO="${SCRIPT_DIR}/tablet-audio"
 if [[ ! -x "${TABLET_AUDIO}" ]]; then
     TABLET_AUDIO="$(command -v tablet-audio || echo "")"
 fi
 
-ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
-STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+TARGET_DEVICE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--device)
+            TARGET_DEVICE="${2:-}"
+            shift 2
+            ;;
+        --device=*)
+            TARGET_DEVICE="${1#*=}"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+DEVICE_SERIAL="$(droidlink_resolve_device "${TARGET_DEVICE}" 2>/dev/null || echo "${TARGET_DEVICE}")"
+BASE_STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+if [[ -n "${DEVICE_SERIAL}" ]]; then
+    STATE_DIR="${BASE_STATE_DIR}/${DEVICE_SERIAL}"
+else
+    STATE_DIR="${BASE_STATE_DIR}"
+fi
+mkdir -p "${STATE_DIR}"
 LOG_FILE="${STATE_DIR}/watchdog.log"
-
-get_device_serial() {
-    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
-        echo "${DROIDLINK_SERIAL}"
-        return
-    fi
-    if [[ -f "${STATE_DIR}/device_serial" ]]; then
-        local configured
-        configured="$(cat "${STATE_DIR}/device_serial" 2>/dev/null || true)"
-        if [[ -n "${configured}" ]]; then
-            echo "${configured}"
-            return
-        fi
-    fi
-    local devices
-    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
-    local count
-    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
-    if [[ "${count}" -ge 1 ]]; then
-        echo "${devices}" | head -n 1
-    else
-        echo ""
-    fi
-}
-
-DEVICE_SERIAL="$(get_device_serial)"
 
 echo "$(date -Iseconds): Watchdog started (PID $$) monitoring device ${DEVICE_SERIAL:-unknown}" >> "${LOG_FILE}"
 
@@ -50,7 +49,7 @@ while true; do
 
     # If device was known, verify it remains connected
     if [[ -n "${DEVICE_SERIAL}" ]]; then
-        if "${ADB}" devices 2>/dev/null | grep -E "^${DEVICE_SERIAL}\s+device" >/dev/null 2>&1; then
+        if "${DROIDLINK_ADB}" devices 2>/dev/null | grep -E "^${DEVICE_SERIAL}\s+device" >/dev/null 2>&1; then
             consecutive_failures=0
         else
             consecutive_failures=$((consecutive_failures + 1))
@@ -58,7 +57,11 @@ while true; do
             if [[ "${consecutive_failures}" -ge 2 ]]; then
                 echo "$(date -Iseconds): Device disconnected. Triggering audio stop & restore..." >> "${LOG_FILE}"
                 if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
-                    "${TABLET_AUDIO}" stop >> "${LOG_FILE}" 2>&1 || true
+                    device_flag=()
+                    if [[ -n "${DEVICE_SERIAL}" ]]; then
+                        device_flag=("--device" "${DEVICE_SERIAL}")
+                    fi
+                    "${TABLET_AUDIO}" "${device_flag[@]}" stop >> "${LOG_FILE}" 2>&1 || true
                 fi
                 exit 0
             fi

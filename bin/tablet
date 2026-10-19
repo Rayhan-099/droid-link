@@ -1,120 +1,212 @@
 #!/usr/bin/env bash
-# DroidLink — Unified CLI for Android Tablet Extended Display and Audio on Linux
+# DroidLink — Unified CLI for Android Tablet Extended Display, Audio and Input on Linux
 # Author: Rayhan Khan (https://github.com/Rayhan-099)
 # License: MIT
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TABLET_AUDIO="${SCRIPT_DIR}/tablet-audio"
+source "${SCRIPT_DIR}/droidlink-device"
 
-# If not in script dir, look in PATH
+TABLET_AUDIO="${SCRIPT_DIR}/tablet-audio"
 if [[ ! -x "${TABLET_AUDIO}" ]]; then
     TABLET_AUDIO="$(command -v tablet-audio || echo "")"
 fi
 
-# Locate ADB
-ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
+INPUT_DRIVER="${SCRIPT_DIR}/droidlink-input"
+if [[ ! -x "${INPUT_DRIVER}" ]]; then
+    INPUT_DRIVER="$(command -v droidlink-input || echo "")"
+fi
 
-# Resolve target Android device serial
-get_device_serial() {
-    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
-        echo "${DROIDLINK_SERIAL}"
-        return
-    fi
-    local state_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
-    if [[ -f "${state_dir}/device_serial" ]]; then
-        local configured
-        configured="$(cat "${state_dir}/device_serial" 2>/dev/null || true)"
-        if [[ -n "${configured}" ]]; then
-            echo "${configured}"
-            return
-        fi
-    fi
-    # Auto-detect if single device is authorized
-    local devices
-    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
-    local count
-    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
-    if [[ "${count}" -eq 1 ]]; then
-        echo "${devices}" | tr -d '[:space:]'
-    elif [[ "${count}" -gt 1 ]]; then
-        echo "${devices}" | head -n 1
-    else
-        echo ""
-    fi
-}
+INPUT_PID_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid"
+
+# Flag parsing
+TARGET_DEVICE=""
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--device)
+            TARGET_DEVICE="${2:-}"
+            shift 2
+            ;;
+        --device=*)
+            TARGET_DEVICE="${1#*=}"
+            shift
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${POSITIONAL_ARGS[@]:-start}"
+ACTION="${1:-start}"
 
 is_audio_active() {
     pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"
 }
 
-case "${1:-start}" in
+is_input_active() {
+    if [[ -f "${INPUT_PID_FILE}" ]]; then
+        local pid
+        pid="$(cat "${INPUT_PID_FILE}" 2>/dev/null || true)"
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    pgrep -f "droidlink-input" >/dev/null 2>&1
+}
+
+start_input_driver() {
+    local dev="$1"
+    if is_input_active; then
+        return 0
+    fi
+
+    if [[ -x "${INPUT_DRIVER}" ]]; then
+        echo "Starting DroidLink Wayland touch & stylus driver..."
+        # Configure ADB reverse tunnel for touch input (port 4820)
+        "${DROIDLINK_ADB}" -s "${dev}" reverse tcp:4820 tcp:4820 2>/dev/null || true
+
+        # Launch input driver in background
+        nohup "${INPUT_DRIVER}" --port 4820 >/dev/null 2>&1 &
+        local pid=$!
+        mkdir -p "$(dirname "${INPUT_PID_FILE}")"
+        echo "${pid}" > "${INPUT_PID_FILE}"
+    fi
+}
+
+stop_input_driver() {
+    if [[ -f "${INPUT_PID_FILE}" ]]; then
+        local pid
+        pid="$(cat "${INPUT_PID_FILE}" 2>/dev/null || true)"
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null || true
+        fi
+        rm -f "${INPUT_PID_FILE}"
+    fi
+    pkill -f "droidlink-input" 2>/dev/null || true
+}
+
+case "${ACTION}" in
   start)
+    dev="$(droidlink_resolve_device "${TARGET_DEVICE}")"
+    echo "Starting DroidLink extended display on device: ${dev}..."
+    start_input_driver "${dev}"
     systemctl --user start moreland.service
     ;;
+
+  devices)
+    echo "=== Connected Android Devices ==="
+    lines="$(droidlink_list_devices)"
+    if [[ -z "${lines}" ]]; then
+        echo "No Android devices connected over USB."
+    else
+        echo "${lines}"
+    fi
+    ;;
+
+  input)
+    subcmd="${2:-status}"
+    case "${subcmd}" in
+      start)
+        dev="$(droidlink_resolve_device "${TARGET_DEVICE}")"
+        start_input_driver "${dev}"
+        echo "Touch and stylus input driver active on device ${dev}."
+        ;;
+      stop)
+        stop_input_driver
+        echo "Touch and stylus input driver stopped."
+        ;;
+      status)
+        if is_input_active; then
+            echo "Touch/Stylus driver: RUNNING (tcp:4820 forward active)"
+        else
+            echo "Touch/Stylus driver: INACTIVE"
+        fi
+        ;;
+      *)
+        echo "Usage: tablet input [start|stop|status]" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
   audio)
     if [[ -z "${TABLET_AUDIO}" || ! -x "${TABLET_AUDIO}" ]]; then
         echo "Error: tablet-audio helper script not found or not executable." >&2
         exit 1
     fi
-    case "${2:-start}" in
-      start)
-        "${TABLET_AUDIO}" start
-        ;;
-      stop)
-        "${TABLET_AUDIO}" stop
-        ;;
-      status)
-        "${TABLET_AUDIO}" status
-        ;;
-      *)
-        echo "Usage: tablet audio [start|stop|status]" >&2
-        exit 1
-        ;;
-    esac
+    subcmd="${2:-start}"
+    shift 2 || true
+    device_flag=()
+    if [[ -n "${TARGET_DEVICE}" ]]; then
+        device_flag=("--device" "${TARGET_DEVICE}")
+    fi
+    "${TABLET_AUDIO}" "${device_flag[@]}" "${subcmd}" "$@"
     ;;
+
   stop)
     if is_audio_active; then
         echo "Stopping active tablet audio stream..."
         if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
-            "${TABLET_AUDIO}" stop
+            device_flag=()
+            if [[ -n "${TARGET_DEVICE}" ]]; then
+                device_flag=("--device" "${TARGET_DEVICE}")
+            fi
+            "${TABLET_AUDIO}" "${device_flag[@]}" stop || true
         fi
     fi
+    echo "Stopping touch input driver..."
+    stop_input_driver
     systemctl --user stop moreland.service
     ;;
+
   status)
     echo "=== Moreland Display Service ==="
     systemctl --user status moreland.service --no-pager || true
     echo ""
     echo "=== Tablet USB Connection ==="
-    dev="$(get_device_serial)"
-    if [[ -n "${dev}" ]] && "${ADB}" devices 2>/dev/null | grep -E "^${dev}\s+device" >/dev/null 2>&1; then
+    dev="$(droidlink_resolve_device "${TARGET_DEVICE}" 2>/dev/null || echo "")"
+    if [[ -n "${dev}" ]]; then
         echo "Device: ${dev} (AUTHORIZED & CONNECTED)"
-        if "${ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "io.github.rayhan099.droidlink.display"; then
+        if "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "io.github.rayhan099.droidlink.display"; then
             echo "Display App: io.github.rayhan099.droidlink.display (Droid Link Display)"
-        elif "${ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "com.moreland.display"; then
+        elif "${DROIDLINK_ADB}" -s "${dev}" shell pm list packages 2>/dev/null | grep -q "com.moreland.display"; then
             echo "Display App: com.moreland.display (Legacy Moreland Display)"
         else
             echo "Display App: None detected (expected io.github.rayhan099.droidlink.display)"
         fi
-    elif [[ -n "${dev}" ]]; then
-        echo "Device: ${dev} (CONFIGURED, BUT NOT CONNECTED OR UNAUTHORIZED)"
     else
-        echo "Device: No authorized ADB device detected"
+        echo "Device: No single authorized target detected. Run 'tablet devices' to inspect."
+    fi
+    echo ""
+    echo "=== Touch & Stylus Input ==="
+    if is_input_active; then
+        echo "Input driver: ACTIVE (uinput touch/stylus mapped to Wayland)"
+    else
+        echo "Input driver: INACTIVE"
     fi
     echo ""
     if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
-        "${TABLET_AUDIO}" status
+        device_flag=()
+        if [[ -n "${TARGET_DEVICE}" ]]; then
+            device_flag=("--device" "${TARGET_DEVICE}")
+        fi
+        "${TABLET_AUDIO}" "${device_flag[@]}" status
     else
         echo "Tablet audio helper not found."
     fi
     ;;
+
   restart)
     systemctl --user restart moreland.service
     ;;
+
   *)
-    echo "Usage: tablet [start|stop|status|restart|audio [start|stop|status]]" >&2
+    echo "Usage: tablet [--device SERIAL] [start|stop|status|devices|restart|input [start|stop|status]|audio [start|stop|status]]" >&2
     exit 1
     ;;
 esac

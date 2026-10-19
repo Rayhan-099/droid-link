@@ -7,6 +7,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-${HOME}/.local/bin}"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+APPLICATIONS_DIR="${HOME}/.local/share/applications"
 STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
 
 echo "=== Uninstalling DroidLink ==="
@@ -37,7 +38,8 @@ if [[ -f "${service_dst}" ]]; then
 fi
 
 # 3. Remove installed binaries
-for bin in tablet tablet-audio tablet-audio-watchdog; do
+BINARIES=(tablet tablet-audio tablet-audio-watchdog droidlink-device droidlink-input tablet-waybar)
+for bin in "${BINARIES[@]}"; do
     dst="${PREFIX}/${bin}"
     if [[ -f "${dst}" ]]; then
         echo "Removing ${dst}"
@@ -49,7 +51,14 @@ for bin in tablet tablet-audio tablet-audio-watchdog; do
     fi
 done
 
-# 4. Clean runtime state
+# 4. Remove desktop launcher
+desktop_dst="${APPLICATIONS_DIR}/io.github.rayhan099.droidlink.desktop"
+if [[ -f "${desktop_dst}" ]]; then
+    echo "Removing ${desktop_dst}"
+    rm -f "${desktop_dst}"
+fi
+
+# 5. Clean runtime state
 if [[ -d "${STATE_DIR}" ]]; then
     echo "Cleaning state directory: ${STATE_DIR}"
     rm -rf "${STATE_DIR}"

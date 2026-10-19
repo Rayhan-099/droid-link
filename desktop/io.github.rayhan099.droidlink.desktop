@@ -1,0 +1,26 @@
+[Desktop Entry]
+Name=Droid Link
+Comment=Android Tablet Extended Display and Audio Integration
+Exec=tablet
+Icon=video-display
+Terminal=false
+Type=Application
+Categories=Utility;HardwareSettings;
+Keywords=android;tablet;display;monitor;audio;hyprland;wayland;
+Actions=start-display;start-audio;stop-all;status;
+
+[Desktop Action start-display]
+Name=Start Extended Display
+Exec=tablet start
+
+[Desktop Action start-audio]
+Name=Start Tablet Audio
+Exec=tablet-audio start
+
+[Desktop Action stop-all]
+Name=Stop Everything
+Exec=tablet stop
+
+[Desktop Action status]
+Name=Show Status
+Exec=tablet-waybar status

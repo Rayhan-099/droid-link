@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# DroidLink — Touch & Stylus Input Protocol Automated Unit Test Suite
+
+import unittest
+import struct
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin")))
+from importlib.machinery import SourceFileLoader
+
+# Load droidlink-input module
+droidlink_input = SourceFileLoader("droidlink_input", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "droidlink-input"))).load_module()
+
+
+class TestInputProtocol(unittest.TestCase):
+
+    def test_parse_valid_touch_packet(self):
+        # Pack a valid 24-byte ACTION_DOWN finger event
+        # magic=0xD1, action=1, tool=0, pointer_id=0, x=32768, y=16384, pressure=65535, tilt_x=0, tilt_y=0, buttons=1
+        pkt = struct.pack(
+            "<BBBBIIIhhBBBB",
+            0xD1, 1, 0, 0,
+            32768, 16384, 65535,
+            0, 0,
+            1, 0, 0, 0
+        )
+        self.assertEqual(len(pkt), 24)
+        parsed = droidlink_input.parse_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["action"], droidlink_input.ACTION_DOWN)
+        self.assertEqual(parsed["tool"], droidlink_input.TOOL_FINGER)
+        self.assertEqual(parsed["pointer_id"], 0)
+        self.assertEqual(parsed["x"], 32768)
+        self.assertEqual(parsed["y"], 16384)
+        self.assertEqual(parsed["pressure"], 65535)
+
+    def test_parse_valid_stylus_packet(self):
+        # Pack a valid 24-byte ACTION_MOVE stylus event with tilt and barrel button
+        pkt = struct.pack(
+            "<BBBBIIIhhBBBB",
+            0xD1, 2, 1, 0,
+            10000, 20000, 45000,
+            -30, 0,
+            2, 0, 0, 0
+        )
+        parsed = droidlink_input.parse_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["action"], droidlink_input.ACTION_MOVE)
+        self.assertEqual(parsed["tool"], droidlink_input.TOOL_STYLUS)
+        self.assertEqual(parsed["tilt_x"], -30)
+        self.assertEqual(parsed["buttons"], 2)
+
+    def test_invalid_magic_rejected(self):
+        # Wrong magic byte
+        pkt = struct.pack(
+            "<BBBBIIIhhBBBB",
+            0xFF, 1, 0, 0,
+            0, 0, 0,
+            0, 0,
+            0, 0, 0, 0
+        )
+        self.assertIsNone(droidlink_input.parse_packet(pkt))
+
+    def test_short_packet_rejected(self):
+        self.assertIsNone(droidlink_input.parse_packet(b"\xD1\x01\x00"))
+
+    def test_mock_uinput_touch_lifecycle(self):
+        dev = droidlink_input.UinputDevice("Test Touch", is_touch=True, mock=True)
+        # Touch down
+        dev.handle_touch(droidlink_input.ACTION_DOWN, pointer_id=0, x=1000, y=2000, pressure=50000)
+        self.assertIn(0, dev.active_slots)
+
+        # Multi-touch second finger down
+        dev.handle_touch(droidlink_input.ACTION_POINTER_DOWN, pointer_id=1, x=5000, y=6000, pressure=40000)
+        self.assertIn(1, dev.active_slots)
+
+        # Move
+        dev.handle_touch(droidlink_input.ACTION_MOVE, pointer_id=0, x=1200, y=2200, pressure=50000)
+        self.assertIn(0, dev.active_slots)
+
+        # Release first finger
+        dev.handle_touch(droidlink_input.ACTION_POINTER_UP, pointer_id=0, x=1200, y=2200, pressure=0)
+        self.assertNotIn(0, dev.active_slots)
+        self.assertIn(1, dev.active_slots)
+
+        # Release second finger
+        dev.handle_touch(droidlink_input.ACTION_UP, pointer_id=1, x=5000, y=6000, pressure=0)
+        self.assertNotIn(1, dev.active_slots)
+        self.assertEqual(len(dev.active_slots), 0)
+
+        # Clean teardown
+        dev.release_all()
+        dev.close()
+
+    def test_mock_uinput_stylus_lifecycle(self):
+        dev = droidlink_input.UinputDevice("Test Stylus", is_touch=False, mock=True)
+        dev.handle_stylus(droidlink_input.ACTION_DOWN, x=1000, y=2000, pressure=30000, tilt_x=15, buttons=0, is_eraser=False)
+        dev.handle_stylus(droidlink_input.ACTION_MOVE, x=1500, y=2500, pressure=40000, tilt_x=20, buttons=2, is_eraser=False)
+        dev.handle_stylus(droidlink_input.ACTION_UP, x=1500, y=2500, pressure=0, tilt_x=0, buttons=0, is_eraser=False)
+        dev.release_all()
+        dev.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

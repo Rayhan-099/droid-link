@@ -6,47 +6,56 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/droidlink-device"
+
 WATCHDOG_SCRIPT="${SCRIPT_DIR}/tablet-audio-watchdog"
 if [[ ! -x "${WATCHDOG_SCRIPT}" ]]; then
     WATCHDOG_SCRIPT="$(command -v tablet-audio-watchdog || echo "")"
 fi
 
-ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
-STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+ADB="${DROIDLINK_ADB}"
+AUDIO_PORT="${DROIDLINK_PORT:-4711}"
+SAMPLE_RATE="${DROIDLINK_RATE:-48000}"
+
+# Parse flags
+TARGET_DEVICE=""
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--device)
+            TARGET_DEVICE="${2:-}"
+            shift 2
+            ;;
+        --device=*)
+            TARGET_DEVICE="${1#*=}"
+            shift
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${POSITIONAL_ARGS[@]:-status}"
+ACTION="${1:-status}"
+
+# Device resolution
+DEVICE_SERIAL="$(droidlink_resolve_device "${TARGET_DEVICE}" 2>/dev/null || echo "")"
+
+BASE_STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+if [[ -n "${DEVICE_SERIAL}" ]]; then
+    STATE_DIR="${BASE_STATE_DIR}/${DEVICE_SERIAL}"
+else
+    STATE_DIR="${BASE_STATE_DIR}"
+fi
+mkdir -p "${STATE_DIR}"
+
 SAVED_SINK_FILE="${STATE_DIR}/saved_sink"
 NULL_MOD_FILE="${STATE_DIR}/null_mod"
 TCP_MOD_FILE="${STATE_DIR}/tcp_mod"
 WATCHDOG_PID_FILE="${STATE_DIR}/watchdog.pid"
-AUDIO_PORT="${DROIDLINK_PORT:-4711}"
-SAMPLE_RATE="${DROIDLINK_RATE:-48000}"
-
-mkdir -p "${STATE_DIR}"
-
-get_device_serial() {
-    if [[ -n "${DROIDLINK_SERIAL:-}" ]]; then
-        echo "${DROIDLINK_SERIAL}"
-        return
-    fi
-    if [[ -f "${STATE_DIR}/device_serial" ]]; then
-        local configured
-        configured="$(cat "${STATE_DIR}/device_serial" 2>/dev/null || true)"
-        if [[ -n "${configured}" ]]; then
-            echo "${configured}"
-            return
-        fi
-    fi
-    local devices
-    devices=$("${ADB}" devices 2>/dev/null | awk '$2 == "device" {print $1}')
-    local count
-    count=$(echo "${devices}" | grep -c '[^[:space:]]' || true)
-    if [[ "${count}" -ge 1 ]]; then
-        echo "${devices}" | head -n 1
-    else
-        echo ""
-    fi
-}
-
-DEVICE_SERIAL="$(get_device_serial)"
 
 DROIDLINK_AUDIO_PKG="io.github.rayhan099.droidlink.audio"
 LEGACY_AUDIO_PKG="com.kaytat.simpleprotocolplayer"
@@ -78,7 +87,6 @@ is_audio_active() {
 }
 
 get_fallback_sink() {
-    # Check if a USB or built-in audio sink is available
     local fb
     fb=$(pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -v "^Tablet_Audio" | head -n 1)
     echo "${fb}"
@@ -97,8 +105,8 @@ start_audio() {
     fi
 
     if ! is_apk_installed; then
-        echo "Error: SimpleProtocolPlayer app (com.kaytat.simpleprotocolplayer) is not installed on device ${DEVICE_SERIAL}." >&2
-        echo "Please install SimpleProtocolPlayer on the tablet before starting audio." >&2
+        echo "Error: Audio receiver app (Droid Link Audio or SimpleProtocolPlayer) is not installed on device ${DEVICE_SERIAL}." >&2
+        echo "Please install Droid Link Audio on the tablet before starting audio." >&2
         exit 1
     fi
 
@@ -107,6 +115,7 @@ start_audio() {
     cur_sink=$(pactl get-default-sink 2>/dev/null || true)
     if [[ -n "${cur_sink}" && "${cur_sink}" != "Tablet_Audio" ]]; then
         echo "${cur_sink}" > "${SAVED_SINK_FILE}"
+        echo "${cur_sink}" > "${BASE_STATE_DIR}/saved_sink"
         echo "Saved current default sink: ${cur_sink}"
     fi
 
@@ -115,12 +124,14 @@ start_audio() {
     local null_mod
     null_mod=$(pactl load-module module-null-sink sink_name=Tablet_Audio sink_properties=device.description="Redmi_Tablet_Audio")
     echo "${null_mod}" > "${NULL_MOD_FILE}"
+    echo "${null_mod}" > "${BASE_STATE_DIR}/null_mod"
 
     # 3. Create module-simple-protocol-tcp on Tablet_Audio.monitor
     echo "Creating PipeWire TCP audio stream on port ${AUDIO_PORT} (${SAMPLE_RATE}Hz stereo)..."
     local tcp_mod
     tcp_mod=$(pactl load-module module-simple-protocol-tcp source=Tablet_Audio.monitor rate=${SAMPLE_RATE} format=s16le channels=2 record=true port=${AUDIO_PORT})
     echo "${tcp_mod}" > "${TCP_MOD_FILE}"
+    echo "${tcp_mod}" > "${BASE_STATE_DIR}/tcp_mod"
 
     # 4. Configure ADB reverse port forwarding over USB
     echo "Configuring ADB reverse port forwarding (USB tcp:${AUDIO_PORT} -> host tcp:${AUDIO_PORT})..."
@@ -170,12 +181,13 @@ start_audio() {
 
     # 7. Start background disconnect watchdog
     if [[ -n "${WATCHDOG_SCRIPT}" && -x "${WATCHDOG_SCRIPT}" ]]; then
-        (setsid "${WATCHDOG_SCRIPT}" >> "${STATE_DIR}/watchdog.log" 2>&1 &)
+        (setsid "${WATCHDOG_SCRIPT}" --device "${DEVICE_SERIAL}" >> "${STATE_DIR}/watchdog.log" 2>&1 &)
         sleep 0.5
         local wd_pid
         wd_pid=$(pgrep -f "tablet-audio-watchdog" | tail -n 1 || true)
         if [[ -n "${wd_pid}" ]]; then
             echo "${wd_pid}" > "${WATCHDOG_PID_FILE}"
+            echo "${wd_pid}" > "${BASE_STATE_DIR}/watchdog.pid"
         fi
     fi
 
@@ -186,14 +198,16 @@ stop_audio() {
     echo "Stopping tablet audio streaming..."
 
     # 1. Terminate watchdog
-    if [[ -f "${WATCHDOG_PID_FILE}" ]]; then
-        local wd_pid
-        wd_pid=$(cat "${WATCHDOG_PID_FILE}" 2>/dev/null || true)
-        if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
-            kill "${wd_pid}" 2>/dev/null || true
+    for pid_f in "${WATCHDOG_PID_FILE}" "${BASE_STATE_DIR}/watchdog.pid"; do
+        if [[ -f "${pid_f}" ]]; then
+            local wd_pid
+            wd_pid=$(cat "${pid_f}" 2>/dev/null || true)
+            if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
+                kill "${wd_pid}" 2>/dev/null || true
+            fi
+            rm -f "${pid_f}"
         fi
-        rm -f "${WATCHDOG_PID_FILE}"
-    fi
+    done
 
     # 2. Tell Android player service to stop
     if is_device_connected; then
@@ -208,13 +222,16 @@ stop_audio() {
 
     # 3. Determine and restore prior audio sink
     local restore_sink=""
-    if [[ -f "${SAVED_SINK_FILE}" ]]; then
-        local saved
-        saved=$(cat "${SAVED_SINK_FILE}" 2>/dev/null || true)
-        if [[ -n "${saved}" ]] && pactl list short sinks 2>/dev/null | grep -q "${saved}"; then
-            restore_sink="${saved}"
+    for sink_f in "${SAVED_SINK_FILE}" "${BASE_STATE_DIR}/saved_sink"; do
+        if [[ -f "${sink_f}" ]]; then
+            local saved
+            saved=$(cat "${sink_f}" 2>/dev/null || true)
+            if [[ -n "${saved}" ]] && pactl list short sinks 2>/dev/null | grep -q "${saved}"; then
+                restore_sink="${saved}"
+                break
+            fi
         fi
-    fi
+    done
 
     if [[ -z "${restore_sink}" ]]; then
         restore_sink=$(get_fallback_sink)
@@ -229,30 +246,34 @@ stop_audio() {
     fi
 
     # 4. Unload PipeWire modules cleanly
-    if [[ -f "${TCP_MOD_FILE}" ]]; then
-        local tcp_mod
-        tcp_mod=$(cat "${TCP_MOD_FILE}" 2>/dev/null || true)
-        if [[ -n "${tcp_mod}" ]]; then
-            pactl unload-module "${tcp_mod}" 2>/dev/null || true
+    for tcp_f in "${TCP_MOD_FILE}" "${BASE_STATE_DIR}/tcp_mod"; do
+        if [[ -f "${tcp_f}" ]]; then
+            local tcp_mod
+            tcp_mod=$(cat "${tcp_f}" 2>/dev/null || true)
+            if [[ -n "${tcp_mod}" ]]; then
+                pactl unload-module "${tcp_mod}" 2>/dev/null || true
+            fi
+            rm -f "${tcp_f}"
         fi
-        rm -f "${TCP_MOD_FILE}"
-    fi
+    done
 
-    if [[ -f "${NULL_MOD_FILE}" ]]; then
-        local null_mod
-        null_mod=$(cat "${NULL_MOD_FILE}" 2>/dev/null || true)
-        if [[ -n "${null_mod}" ]]; then
-            pactl unload-module "${null_mod}" 2>/dev/null || true
+    for null_f in "${NULL_MOD_FILE}" "${BASE_STATE_DIR}/null_mod"; do
+        if [[ -f "${null_f}" ]]; then
+            local null_mod
+            null_mod=$(cat "${null_f}" 2>/dev/null || true)
+            if [[ -n "${null_mod}" ]]; then
+                pactl unload-module "${null_mod}" 2>/dev/null || true
+            fi
+            rm -f "${null_f}"
         fi
-        rm -f "${NULL_MOD_FILE}"
-    fi
+    done
 
     # Cleanup any lingering Tablet_Audio modules
     for mod_id in $(pactl list short modules 2>/dev/null | grep -E "(Tablet_Audio|simple-protocol-tcp.*${AUDIO_PORT})" | awk '{print $1}'); do
         pactl unload-module "${mod_id}" 2>/dev/null || true
     done
 
-    rm -f "${SAVED_SINK_FILE}"
+    rm -f "${SAVED_SINK_FILE}" "${BASE_STATE_DIR}/saved_sink"
     echo "Tablet audio stopped and laptop audio restored."
 }
 
@@ -272,19 +293,25 @@ status_audio() {
         else
             echo "TCP sender: NOT listening"
         fi
-        if [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" reverse --list 2>/dev/null | grep -q "tcp:${AUDIO_PORT}"; then
+        if [[ -n "${DEVICE_SERIAL}" ]] && "${ADB}" -s "${DEVICE_SERIAL}" reverse --list 2>/dev/null | grep -q "tcp:${AUDIO_PORT}"; then
             echo "ADB USB forward: ACTIVE (tcp:${AUDIO_PORT} -> tcp:${AUDIO_PORT})"
         else
             echo "ADB USB forward: INACTIVE"
         fi
-        if [[ -f "${WATCHDOG_PID_FILE}" ]]; then
-            local wd_pid
-            wd_pid=$(cat "${WATCHDOG_PID_FILE}" 2>/dev/null || true)
-            if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
-                echo "Watchdog monitor: RUNNING (PID ${wd_pid})"
-            else
-                echo "Watchdog monitor: DEAD"
+        local wd_running=false
+        for pid_f in "${WATCHDOG_PID_FILE}" "${BASE_STATE_DIR}/watchdog.pid"; do
+            if [[ -f "${pid_f}" ]]; then
+                local wd_pid
+                wd_pid=$(cat "${pid_f}" 2>/dev/null || true)
+                if [[ -n "${wd_pid}" ]] && kill -0 "${wd_pid}" 2>/dev/null; then
+                    echo "Watchdog monitor: RUNNING (PID ${wd_pid})"
+                    wd_running=true
+                    break
+                fi
             fi
+        done
+        if [[ "${wd_running}" == false ]]; then
+            echo "Watchdog monitor: DEAD"
         fi
     else
         echo "Audio stream: INACTIVE"
@@ -292,7 +319,7 @@ status_audio() {
     echo "Current default sink: $(pactl get-default-sink 2>/dev/null || echo 'unknown')"
 }
 
-case "${1:-status}" in
+case "${ACTION}" in
     start)
         start_audio
         ;;
@@ -303,7 +330,7 @@ case "${1:-status}" in
         status_audio
         ;;
     *)
-        echo "Usage: tablet-audio [start|stop|status]" >&2
+        echo "Usage: tablet-audio [--device SERIAL] [start|stop|status]" >&2
         exit 1
         ;;
 esac

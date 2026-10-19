@@ -38,7 +38,7 @@ cd droid-link
 # Test dry-run first (optional)
 ./scripts/install.sh --dry-run
 
-# Install binaries into ~/.local/bin and systemd unit into ~/.config/systemd/user
+# Install binaries into ~/.local/bin, desktop launchers, and systemd units
 ./scripts/install.sh
 ```
 
@@ -50,16 +50,43 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ---
 
-## 3. Building Moreland with Intel VA-API Patch
+## 3. Configuring uinput for Touch & Stylus (Non-Root)
 
-For Intel GPU users (Iris Plus, Xe, Arc), Moreland requires the format negotiation patch included in `patches/`:
+To allow the `droidlink-input` daemon to inject touch screen and stylus tablet events without running as root:
+
+```bash
+# Run the automated uinput setup script
+sudo ./scripts/setup-uinput.sh
+```
+
+This installs `/etc/udev/rules.d/99-droidlink-uinput.rules`, loads the `uinput` kernel module, adds the `uaccess` tag, and adds your user to the `input` group.
+
+To map input to the extended tablet display in Hyprland, ensure your `~/.config/hypr/hyprland.conf` contains:
+
+```ini
+device {
+    name = droidlink-touch-screen
+    output = moreland
+}
+
+device {
+    name = droidlink-stylus
+    output = moreland
+}
+```
+
+---
+
+## 4. Building Moreland with Intel VA-API & Adaptive Bitrate Patch
+
+For Intel GPU users (Iris Plus, Xe, Arc) and dynamic bitrate modulation:
 
 ```bash
 # 1. Clone upstream Moreland
 git clone https://github.com/adiimanav/moreland.git ~/Repos/moreland
 cd ~/Repos/moreland
 
-# 2. Apply the DroidLink Intel DMA-BUF patch
+# 2. Apply the DroidLink Intel DMA-BUF & Adaptive Bitrate patch
 git apply /path/to/droid-link/patches/moreland-intel-vaapi-dmabuf.patch
 
 # 3. Build release binary
@@ -71,7 +98,7 @@ cp target/release/moreland ~/.local/bin/
 
 ---
 
-## 4. Android Companion App Setup
+## 5. Android Companion App Setup
 
 Droid Link provides first-party, reproducibly buildable companion apps in the `android/` directory:
 
@@ -85,26 +112,69 @@ Droid Link provides first-party, reproducibly buildable companion apps in the `a
    adb install -r display/build/outputs/apk/release/display-release.apk
    adb install -r audio/build/outputs/apk/release/audio-release.apk
    ```
-3. **Xiaomi / Redmi (MIUI & HyperOS) alternative**:
-   If "Install via USB" requires an account login, push to storage and install via File Manager:
-   ```bash
-   adb push display/build/outputs/apk/release/display-release.apk /sdcard/Download/
-   adb push audio/build/outputs/apk/release/audio-release.apk /sdcard/Download/
-   ```
-   Open **File Manager** on the tablet, navigate to **Downloads**, and tap each APK to install.
-   *(Legacy upstream apps `com.moreland.display` and `com.kaytat.simpleprotocolplayer` remain fully supported via automatic fallback).*
+
+### Xiaomi HyperOS & MIUI Specific Instructions
+
+Xiaomi devices have additional security safeguards that may affect ADB and background services:
+
+1. **Enabling Developer Options**:
+   - Go to **Settings > About tablet > Detailed info and specs**.
+   - Tap **OS version** 7 times until you see *"You are now a developer!"*.
+2. **Enabling USB Debugging**:
+   - Go to **Settings > Additional settings > Developer options**.
+   - Turn on **USB debugging**.
+   - When connecting the cable to Linux, accept the **"Allow USB debugging?"** prompt and check **"Always allow from this computer"**.
+3. **Bypassing "Install via USB" Account Lock**:
+   - If MIUI / HyperOS prevents direct `adb install` because a SIM card or Mi Account is not logged in, sideload the APKs directly via storage:
+     ```bash
+     adb push display/build/outputs/apk/release/display-release.apk /sdcard/Download/
+     adb push audio/build/outputs/apk/release/audio-release.apk /sdcard/Download/
+     ```
+   - Open the tablet's **File Manager**, tap **Downloads**, and tap each APK to install.
+4. **Preventing Background Audio Sleep**:
+   - To prevent HyperOS aggressive RAM management from killing background audio:
+   - Go to **Settings > Apps > Manage apps > Droid Link Audio > Battery saver**.
+   - Select **No restrictions**.
+   - Enable **Autostart** if you want seamless playback.
+
+*(Legacy upstream apps `com.moreland.display` and `com.kaytat.simpleprotocolplayer` remain fully supported via automatic fallback).*
 
 ---
 
-## 5. Verification
+## 6. Waybar Status Bar Integration (Optional)
+
+Add one-click toggle controls directly to your Waybar panel:
+
+1. Add the custom module to `~/.config/waybar/config.jsonc`:
+   ```jsonc
+   "custom/droidlink": {
+       "exec": "tablet-waybar status",
+       "return-type": "json",
+       "interval": 2,
+       "on-click": "tablet-waybar toggle-display",
+       "on-click-right": "tablet-waybar toggle-audio",
+       "on-click-middle": "tablet-waybar stop-all",
+       "tooltip": true
+   }
+   ```
+2. Style the widget using `examples/waybar/style.css`.
+
+---
+
+## 7. Verification
 
 Connect your tablet with a USB cable, unlock it, and run:
 
 ```bash
+# Verify connected devices
+tablet devices
+
+# Check live connection and stream status
 tablet status
 ```
 
 You should see:
 - Display Service status
 - Tablet USB Connection: `AUTHORIZED & CONNECTED`
-- Tablet Audio Status: `INACTIVE`
+- Tablet Audio Status: `INACTIVE` (or `ACTIVE`)
+- Connected device serial and model info

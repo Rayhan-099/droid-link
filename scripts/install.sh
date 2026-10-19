@@ -7,6 +7,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-${HOME}/.local/bin}"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+APPLICATIONS_DIR="${HOME}/.local/share/applications"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DRY_RUN=false
@@ -16,14 +17,15 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 echo "=== Installing DroidLink ==="
-echo "Target bin directory:     ${PREFIX}"
-echo "Target systemd directory: ${SYSTEMD_USER_DIR}"
+echo "Target bin directory:          ${PREFIX}"
+echo "Target systemd directory:      ${SYSTEMD_USER_DIR}"
+echo "Target applications directory: ${APPLICATIONS_DIR}"
 echo ""
 
 # 1. Dependency checks
 echo "Checking dependencies..."
 MISSING_DEPS=()
-for cmd in pactl adb systemctl ss; do
+for cmd in pactl adb systemctl ss python3; do
     if ! command -v "${cmd}" >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/${cmd}" ]]; then
         MISSING_DEPS+=("${cmd}")
     fi
@@ -36,7 +38,7 @@ if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     done
     echo "Please ensure these utilities are installed for full functionality." >&2
 else
-    echo "All core dependencies verified (pactl, adb, systemctl, ss)."
+    echo "All core dependencies verified (pactl, adb, systemctl, ss, python3)."
 fi
 
 # 2. Check Moreland binary
@@ -49,10 +51,12 @@ fi
 if [[ "${DRY_RUN}" == false ]]; then
     mkdir -p "${PREFIX}"
     mkdir -p "${SYSTEMD_USER_DIR}"
+    mkdir -p "${APPLICATIONS_DIR}"
 fi
 
 # 4. Install binaries
-for bin in tablet tablet-audio tablet-audio-watchdog; do
+BINARIES=(tablet tablet-audio tablet-audio-watchdog droidlink-device droidlink-input tablet-waybar)
+for bin in "${BINARIES[@]}"; do
     src="${REPO_DIR}/bin/${bin}"
     dst="${PREFIX}/${bin}"
     if [[ -f "${dst}" ]]; then
@@ -79,7 +83,17 @@ if [[ "${DRY_RUN}" == false ]]; then
     systemctl --user daemon-reload || true
 fi
 
-# 6. Check Android companion APKs
+# 6. Install desktop launcher
+desktop_src="${REPO_DIR}/desktop/io.github.rayhan099.droidlink.desktop"
+desktop_dst="${APPLICATIONS_DIR}/io.github.rayhan099.droidlink.desktop"
+if [[ -f "${desktop_src}" ]]; then
+    echo "Installing desktop launcher -> ${desktop_dst}"
+    if [[ "${DRY_RUN}" == false ]]; then
+        cp -f "${desktop_src}" "${desktop_dst}"
+    fi
+fi
+
+# 7. Check Android companion APKs
 if [[ -f "${REPO_DIR}/android/display/build/outputs/apk/release/display-release.apk" && -f "${REPO_DIR}/android/audio/build/outputs/apk/release/audio-release.apk" ]]; then
     echo ""
     echo "Found built Android companion APKs:"

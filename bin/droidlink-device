@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# DroidLink — Robust Multi-Device ADB Discovery & Resolution Library
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+# License: MIT
+
+# Note: This library is intended to be sourced by DroidLink shell scripts.
+
+DROIDLINK_ADB="${ADB:-$(command -v adb 2>/dev/null || echo "${HOME}/.local/bin/adb")}"
+
+droidlink_list_devices() {
+    "${DROIDLINK_ADB}" devices -l 2>/dev/null | awk 'NR>1 && NF>=2 {print $0}'
+}
+
+droidlink_parse_devices() {
+    local raw_devices
+    raw_devices="$(droidlink_list_devices)"
+    if [[ -z "${raw_devices}" ]]; then
+        return 0
+    fi
+    echo "${raw_devices}"
+}
+
+droidlink_resolve_device() {
+    local explicit_serial="${1:-}"
+
+    # 1. Precedence: explicit arg > DROIDLINK_SERIAL env > saved file
+    local target_serial="${explicit_serial}"
+    if [[ -z "${target_serial}" ]]; then
+        target_serial="${DROIDLINK_SERIAL:-}"
+    fi
+    if [[ -z "${target_serial}" ]]; then
+        local base_config="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet"
+        if [[ -f "${base_config}/device_serial" ]]; then
+            target_serial="$(cat "${base_config}/device_serial" 2>/dev/null | tr -d '[:space:]' || true)"
+        fi
+    fi
+
+    local lines
+    lines="$(droidlink_list_devices)"
+
+    # If an explicit device was requested or configured
+    if [[ -n "${target_serial}" ]]; then
+        local match
+        match="$(echo "${lines}" | awk -v s="${target_serial}" '$1 == s {print $0}')"
+        if [[ -z "${match}" ]]; then
+            echo "Error: Requested Android device '${target_serial}' was not detected by ADB." >&2
+            echo "Connected devices:" >&2
+            if [[ -z "${lines}" ]]; then
+                echo "  (None)" >&2
+            else
+                echo "${lines}" | sed 's/^/  /' >&2
+            fi
+            return 1
+        fi
+
+        local state
+        state="$(echo "${match}" | awk '{print $2}')"
+        if [[ "${state}" == "device" ]]; then
+            echo "${target_serial}"
+            return 0
+        elif [[ "${state}" == "unauthorized" ]]; then
+            echo "Error: Android device '${target_serial}' is connected but unauthorized." >&2
+            echo "Please unlock your tablet and tap 'Allow' on the USB debugging authorization prompt." >&2
+            return 3
+        elif [[ "${state}" == "offline" ]]; then
+            echo "Error: Android device '${target_serial}' is in an offline state." >&2
+            echo "Try reconnecting the USB cable or running 'adb reconnect'." >&2
+            return 4
+        else
+            echo "Error: Android device '${target_serial}' is in '${state}' state." >&2
+            return 1
+        fi
+    fi
+
+    # Auto-detection when no specific serial was specified
+    local authorized_devices
+    authorized_devices="$(echo "${lines}" | awk '$2 == "device" {print $1}')"
+    local count
+    count="$(echo "${authorized_devices}" | grep -c '[^[:space:]]' || true)"
+
+    if [[ "${count}" -eq 1 ]]; then
+        echo "${authorized_devices}" | tr -d '[:space:]'
+        return 0
+    elif [[ "${count}" -eq 0 ]]; then
+        local unauthorized
+        unauthorized="$(echo "${lines}" | awk '$2 == "unauthorized" {print $1}')"
+        local unauth_count
+        unauth_count="$(echo "${unauthorized}" | grep -c '[^[:space:]]' || true)"
+        if [[ "${unauth_count}" -gt 0 ]]; then
+            echo "Error: Android device(s) connected but unauthorized:" >&2
+            echo "${lines}" | awk '$2 == "unauthorized" {print "  - " $1}' >&2
+            echo "Please unlock your device(s) and accept the USB debugging RSA key prompt." >&2
+            return 3
+        fi
+        echo "Error: No authorized Android device detected over ADB." >&2
+        echo "Please connect your tablet via USB with USB debugging enabled." >&2
+        return 1
+    else
+        echo "Error: Multiple authorized Android devices detected:" >&2
+        echo "${lines}" | awk '$2 == "device" {
+            model=""; product="";
+            for (i=3; i<=NF; i++) {
+                if ($i ~ /^model:/) sub(/^model:/, "", $i), model=$i;
+                if ($i ~ /^product:/) sub(/^product:/, "", $i), product=$i;
+            }
+            desc = (model != "") ? model : product;
+            if (desc != "") desc = " (" desc ")";
+            print "  - " $1 desc;
+        }' >&2
+        echo "Specify the target device using '--device <SERIAL>' or by setting 'DROIDLINK_SERIAL=<SERIAL>'." >&2
+        return 2
+    fi
+}
+
+droidlink_state_dir() {
+    local serial="${1:-default}"
+    local dir="${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/${serial}"
+    mkdir -p "${dir}"
+    echo "${dir}"
+}

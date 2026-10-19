@@ -1,0 +1,15 @@
+// DroidLink Waybar Module Configuration Example
+// Add "custom/droidlink" to your modules list (e.g. "modules-right": [..., "custom/droidlink"])
+
+{
+    "custom/droidlink": {
+        "format": "{}",
+        "return-type": "json",
+        "exec": "$HOME/.local/bin/tablet-waybar status",
+        "interval": 2,
+        "on-click": "$HOME/.local/bin/tablet-waybar toggle-display",
+        "on-click-middle": "$HOME/.local/bin/tablet-waybar toggle-audio",
+        "on-click-right": "$HOME/.local/bin/tablet-waybar stop-all",
+        "tooltip": true
+    }
+}

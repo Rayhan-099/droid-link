@@ -1,0 +1,46 @@
+/* DroidLink Waybar Module Styling Example */
+
+#custom-droidlink {
+    padding: 0 10px;
+    margin: 0 4px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+/* Active: Display + Audio streaming */
+#custom-droidlink.active {
+    background-color: #22c55e;
+    color: #0f172a;
+    font-weight: bold;
+}
+
+/* Display only */
+#custom-droidlink.display-only {
+    background-color: #3b82f6;
+    color: #ffffff;
+}
+
+/* Audio only */
+#custom-droidlink.audio-only {
+    background-color: #f59e0b;
+    color: #0f172a;
+}
+
+/* Connected standby */
+#custom-droidlink.standby {
+    background-color: #334155;
+    color: #94a3b8;
+}
+
+/* Connected but unauthorized */
+#custom-droidlink.unauthorized {
+    background-color: #ef4444;
+    color: #ffffff;
+    animation: blink 1s infinite alternate;
+}
+
+/* Disconnected */
+#custom-droidlink.disconnected {
+    background-color: transparent;
+    color: #64748b;
+}

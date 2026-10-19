@@ -8,7 +8,6 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
-import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedInputStream
@@ -19,7 +18,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "DroidLinkDisplay"
 
-class VideoStream {
+enum class StreamState {
+    DISCONNECTED,
+    CONNECTING,
+    CONNECTED,
+    SURFACE_DETACHED,
+    ERROR
+}
+
+typealias StreamListener = (StreamState, String?) -> Unit
+
+class VideoStream(private val listener: StreamListener? = null) {
 
     private val running = AtomicBoolean(true)
     private var worker: Thread? = null
@@ -28,7 +37,7 @@ class VideoStream {
     private var currentSurface: Surface? = null
 
     @Volatile
-    private var surfaceChanged = false
+    private var surfaceNeedsRebind = false
 
     fun start() {
         worker = Thread({ run() }, "droidlink-video-worker").apply { start() }
@@ -42,29 +51,34 @@ class VideoStream {
 
     fun attachSurface(surface: Surface) {
         currentSurface = surface
-        surfaceChanged = true
+        surfaceNeedsRebind = true
+        listener?.invoke(StreamState.CONNECTED, null)
     }
 
     fun detachSurface() {
         currentSurface = null
-        surfaceChanged = true
+        surfaceNeedsRebind = true
+        listener?.invoke(StreamState.SURFACE_DETACHED, "Display backgrounded; streaming standby")
     }
 
     private fun run() {
         while (running.get()) {
             try {
+                listener?.invoke(StreamState.CONNECTING, "Connecting to host daemon...")
                 connectAndStream()
-            } catch (e: InterruptedException) {
+            } catch (_: InterruptedException) {
                 break
             } catch (e: Exception) {
                 Log.w(TAG, "stream error: ${e.message}; retrying in 1s")
+                listener?.invoke(StreamState.ERROR, e.message ?: "Stream error")
                 try {
                     Thread.sleep(1000)
-                } catch (ie: InterruptedException) {
+                } catch (_: InterruptedException) {
                     break
                 }
             }
         }
+        listener?.invoke(StreamState.DISCONNECTED, null)
     }
 
     private fun connectAndStream() {
@@ -85,7 +99,9 @@ class VideoStream {
         val header = Protocol.readStreamHeader(input)
         Log.i(TAG, "stream header: ${header.width}x${header.height}@${header.framerate} ${header.mime}")
 
+        // Wait until an initial surface is provided
         while (currentSurface == null && running.get()) {
+            listener?.invoke(StreamState.CONNECTING, "Waiting for display surface...")
             Thread.sleep(50)
         }
         val surface = currentSurface ?: return
@@ -100,17 +116,28 @@ class VideoStream {
         codec.configure(format, surface, null, 0)
         codec.start()
         Log.i(TAG, "MediaCodec started: ${codec.name}")
+        listener?.invoke(StreamState.CONNECTED, "${header.width}x${header.height}@${header.framerate}Hz")
 
         var frameBuf = ByteArray(256 * 1024)
-        val info = MediaCodec.BufferInfo()
         val drainThread = Thread({ drainCodec(codec, output) }, "droidlink-codec-drain").apply { start() }
 
         try {
             while (running.get()) {
-                if (surfaceChanged) {
-                    surfaceChanged = false
-                    Log.i(TAG, "surface changed mid-stream; reconnecting")
-                    break
+                if (surfaceNeedsRebind) {
+                    surfaceNeedsRebind = false
+                    val newSurface = currentSurface
+                    if (newSurface != null && newSurface.isValid) {
+                        try {
+                            codec.setOutputSurface(newSurface)
+                            Log.i(TAG, "Dynamic surface re-attached via setOutputSurface")
+                            listener?.invoke(StreamState.CONNECTED, null)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed setOutputSurface, restarting decoder: ${e.message}")
+                            break
+                        }
+                    } else {
+                        Log.i(TAG, "Surface detached; continuing decode without rendering to avoid stalling host")
+                    }
                 }
 
                 val fh = Protocol.readFrameHeader(input)
@@ -150,7 +177,9 @@ class VideoStream {
             try {
                 val outIdx = codec.dequeueOutputBuffer(info, 5000)
                 if (outIdx >= 0) {
-                    codec.releaseOutputBuffer(outIdx, true)
+                    val activeSurface = currentSurface
+                    val canRender = activeSurface != null && activeSurface.isValid
+                    codec.releaseOutputBuffer(outIdx, canRender)
 
                     val ptsNs = info.presentationTimeUs * 1000
                     java.nio.ByteBuffer.wrap(ackBuf).putLong(ptsNs)

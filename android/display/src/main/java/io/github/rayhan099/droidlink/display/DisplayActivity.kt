@@ -5,8 +5,14 @@
 package io.github.rayhan099.droidlink.display
 
 import android.app.Activity
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.util.Rational
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -19,6 +25,7 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
     private var stream: VideoStream? = null
+    private var touchClient: TouchClient? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,7 +48,42 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         root.addView(status, FrameLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
-        stream = VideoStream().also { it.start() }
+        // Initialize touch & stylus client
+        touchClient = TouchClient().also { it.start() }
+
+        // Forward touch events from surfaceView to touchClient
+        surfaceView.setOnTouchListener { v, event ->
+            touchClient?.sendMotionEvent(event, v.width, v.height)
+            true
+        }
+
+        // Initialize video stream with status updates
+        stream = VideoStream { state, msg ->
+            runOnUiThread {
+                when (state) {
+                    StreamState.CONNECTED -> {
+                        status.visibility = View.GONE
+                    }
+                    StreamState.CONNECTING -> {
+                        status.visibility = View.VISIBLE
+                        status.text = msg ?: getString(R.string.waiting_status)
+                    }
+                    StreamState.SURFACE_DETACHED -> {
+                        status.visibility = View.VISIBLE
+                        status.text = msg ?: "Standby mode"
+                    }
+                    StreamState.ERROR -> {
+                        status.visibility = View.VISIBLE
+                        status.text = "Error: $msg\nRetrying..."
+                    }
+                    StreamState.DISCONNECTED -> {
+                        status.visibility = View.VISIBLE
+                        status.text = getString(R.string.waiting_status)
+                    }
+                }
+            }
+        }.also { it.start() }
+
         surfaceView.holder.addCallback(this)
         goImmersive()
     }
@@ -63,8 +105,30 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         )
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val params = PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(16, 10))
+                    .build()
+                enterPictureInPictureMode(params)
+            } catch (e: Exception) {
+                Log.w("DisplayActivity", "Could not enter Picture-in-Picture: ${e.message}")
+            }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) {
+            status.visibility = View.GONE
+        } else {
+            goImmersive()
+        }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
-        status.visibility = View.GONE
         stream?.attachSurface(holder.surface)
     }
 
@@ -74,13 +138,14 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stream?.detachSurface()
-        status.visibility = View.VISIBLE
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stream?.stop()
         stream = null
+        touchClient?.stop()
+        touchClient = null
     }
 
     companion object {

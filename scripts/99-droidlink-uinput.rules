@@ -1,0 +1,2 @@
+# DroidLink /dev/uinput udev rules for non-root Wayland touch & stylus injection
+KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", TAG+="uaccess"

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# DroidLink — Waybar Status Reporter & One-Click Action Handler
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+# License: MIT
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/droidlink-device"
+
+is_display_active() {
+    systemctl --user is-active --quiet moreland.service 2>/dev/null
+}
+
+is_audio_active() {
+    pactl list short sinks 2>/dev/null | grep -q "Tablet_Audio"
+}
+
+get_waybar_json() {
+    local dev=""
+    local dev_state="disconnected"
+
+    # Fast check without hanging
+    local lines
+    lines="$(droidlink_list_devices)"
+    local auth_devs
+    auth_devs="$(echo "${lines}" | awk '$2 == "device" {print $1}')"
+    local count
+    count="$(echo "${auth_devs}" | grep -c '[^[:space:]]' || true)"
+
+    if [[ "${count}" -eq 1 ]]; then
+        dev="$(echo "${auth_devs}" | tr -d '[:space:]')"
+        dev_state="device"
+    elif [[ "${count}" -gt 1 ]]; then
+        dev="multi"
+        dev_state="device"
+    else
+        local unauth
+        unauth="$(echo "${lines}" | awk '$2 == "unauthorized" {print $1}')"
+        if [[ -n "${unauth}" ]]; then
+            dev_state="unauthorized"
+        fi
+    fi
+
+    local disp_on=false
+    local audio_on=false
+    if is_display_active; then disp_on=true; fi
+    if is_audio_active; then audio_on=true; fi
+
+    local icon=""
+    local class=""
+    local text=""
+    local tooltip=""
+
+    if [[ "${disp_on}" == true && "${audio_on}" == true ]]; then
+        icon="󰍹 󰓃"
+        class="active"
+        text="Tablet: Display + Audio"
+        tooltip="DroidLink: Display ACTIVE (1920x1200@90Hz)\nAudio: ACTIVE (Tablet_Audio)\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Toggle Audio | Right-click: Stop All"
+    elif [[ "${disp_on}" == true ]]; then
+        icon="󰍹"
+        class="display-only"
+        text="Tablet: Display"
+        tooltip="DroidLink: Display ACTIVE (1920x1200@90Hz)\nAudio: Inactive\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Start Audio | Right-click: Stop All"
+    elif [[ "${audio_on}" == true ]]; then
+        icon="󰓃"
+        class="audio-only"
+        text="Tablet: Audio"
+        tooltip="DroidLink: Audio ACTIVE (Tablet_Audio)\nDisplay: Inactive\nDevice: ${dev}\nLeft-click: Start Display | Middle-click: Toggle Audio | Right-click: Stop All"
+    elif [[ "${dev_state}" == "device" ]]; then
+        icon="󰄬"
+        class="standby"
+        text="Tablet: Connected"
+        tooltip="DroidLink: Device ${dev} connected via USB\nStreams: Idle\nLeft-click: Start Display | Middle-click: Start Audio"
+    elif [[ "${dev_state}" == "unauthorized" ]]; then
+        icon="󰚌"
+        class="unauthorized"
+        text="Tablet: Unauthorized"
+        tooltip="DroidLink: Device connected but unauthorized.\nUnlock screen and accept USB debugging prompt."
+    else
+        icon="󰂲"
+        class="disconnected"
+        text="Tablet: Offline"
+        tooltip="DroidLink: No tablet connected via USB.\nConnect tablet with USB debugging enabled."
+    fi
+
+    # Escape quotes for JSON safely
+    local escaped_tooltip
+    escaped_tooltip="$(echo -e "${tooltip}" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')"
+
+    printf '{"text":"%s %s","alt":"%s","tooltip":"%s","class":"%s"}\n' \
+        "${icon}" "${text}" "${class}" "${escaped_tooltip}" "${class}"
+}
+
+case "${1:-status}" in
+    status)
+        get_waybar_json
+        ;;
+    toggle-display)
+        if is_display_active; then
+            "${SCRIPT_DIR}/tablet" stop
+        else
+            "${SCRIPT_DIR}/tablet" start
+        fi
+        ;;
+    toggle-audio)
+        if is_audio_active; then
+            "${SCRIPT_DIR}/tablet-audio" stop
+        else
+            "${SCRIPT_DIR}/tablet-audio" start
+        fi
+        ;;
+    stop-all)
+        "${SCRIPT_DIR}/tablet" stop
+        ;;
+    *)
+        echo "Usage: tablet-waybar [status|toggle-display|toggle-audio|stop-all]" >&2
+        exit 1
+        ;;
+esac

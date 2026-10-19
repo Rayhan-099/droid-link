@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# DroidLink — High-Performance Wayland Touch & Stylus uinput Driver
+# Author: Rayhan Khan (https://github.com/Rayhan-099)
+
+import os
+import sys
+import time
+import socket
+import struct
+import fcntl
+import signal
+import argparse
+
+# Protocol constants
+MAGIC = 0xD1
+PACKET_LEN = 24
+
+ACTION_DOWN = 1
+ACTION_MOVE = 2
+ACTION_UP = 3
+ACTION_CANCEL = 4
+ACTION_POINTER_DOWN = 5
+ACTION_POINTER_UP = 6
+
+TOOL_FINGER = 0
+TOOL_STYLUS = 1
+TOOL_ERASER = 2
+TOOL_MOUSE = 3
+
+# Linux input event constants
+EV_SYN = 0x00
+EV_KEY = 0x01
+EV_ABS = 0x03
+
+SYN_REPORT = 0
+SYN_CONFIG = 1
+SYN_MT_REPORT = 2
+SYN_DROPPED = 3
+
+BTN_TOUCH = 0x14A
+BTN_TOOL_PEN = 0x140
+BTN_TOOL_RUBBER = 0x141
+BTN_STYLUS = 0x14B
+BTN_STYLUS2 = 0x14C
+
+ABS_X = 0x00
+ABS_Y = 0x01
+ABS_PRESSURE = 0x18
+ABS_TILT_X = 0x1A
+ABS_TILT_Y = 0x1B
+
+ABS_MT_SLOT = 0x2F
+ABS_MT_TOUCH_MAJOR = 0x30
+ABS_MT_WIDTH_MAJOR = 0x32
+ABS_MT_ORIENTATION = 0x34
+ABS_MT_POSITION_X = 0x35
+ABS_MT_POSITION_Y = 0x36
+ABS_MT_TOOL_TYPE = 0x37
+ABS_MT_BLOB_ID = 0x38
+ABS_MT_TRACKING_ID = 0x39
+ABS_MT_PRESSURE = 0x3A
+
+UI_SET_EVBIT = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_SET_ABSBIT = 0x40045566
+UI_DEV_CREATE = 0x5501
+UI_DEV_DESTROY = 0x5502
+
+BUS_VIRTUAL = 0x06
+UINPUT_MAX_NAME_SIZE = 80
+
+
+class UinputDevice:
+    def __init__(self, name: str, is_touch: bool = True, mock: bool = False):
+        self.name = name
+        self.is_touch = is_touch
+        self.mock = mock
+        self.fd = None
+        self.active_slots = {}
+        self.tracking_counter = 1
+        self.stylus_pressed = False
+
+        if not self.mock:
+            self._setup_device()
+
+    def _setup_device(self):
+        uinput_paths = ["/dev/uinput", "/dev/input/uinput"]
+        path = None
+        for p in uinput_paths:
+            if os.path.exists(p):
+                path = p
+                break
+
+        if not path:
+            raise FileNotFoundError("Could not locate /dev/uinput on system.")
+
+        if not os.access(path, os.W_OK):
+            raise PermissionError(
+                f"Cannot write to {path}.\n"
+                "To enable non-root virtual touch access, configure the udev rule:\n"
+                "  echo 'KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\"' | "
+                "sudo tee /etc/udev/rules.d/99-droidlink-uinput.rules\n"
+                "  sudo udevadm trigger /dev/uinput"
+            )
+
+        self.fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+
+        # Enable event types
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_SYN)
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_ABS)
+
+        if self.is_touch:
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, BTN_TOUCH)
+            abs_bits = [
+                (ABS_MT_SLOT, 0, 9),
+                (ABS_MT_TRACKING_ID, 0, 65535),
+                (ABS_MT_POSITION_X, 0, 65535),
+                (ABS_MT_POSITION_Y, 0, 65535),
+                (ABS_MT_PRESSURE, 0, 65535),
+            ]
+        else:
+            for key in [BTN_TOOL_PEN, BTN_TOOL_RUBBER, BTN_TOUCH, BTN_STYLUS, BTN_STYLUS2]:
+                fcntl.ioctl(self.fd, UI_SET_KEYBIT, key)
+            abs_bits = [
+                (ABS_X, 0, 65535),
+                (ABS_Y, 0, 65535),
+                (ABS_PRESSURE, 0, 65535),
+                (ABS_TILT_X, -90, 90),
+                (ABS_TILT_Y, -90, 90),
+            ]
+
+        for abs_code, min_val, max_val in abs_bits:
+            fcntl.ioctl(self.fd, UI_SET_ABSBIT, abs_code)
+
+        # Construct uinput_user_dev struct
+        name_bytes = self.name.encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1]
+        name_padded = name_bytes.ljust(UINPUT_MAX_NAME_SIZE, b"\x00")
+        input_id = struct.pack("HHHH", BUS_VIRTUAL, 0x1234, 0x5678, 1)
+
+        absmax = [0] * 64
+        absmin = [0] * 64
+        absfuzz = [0] * 64
+        absflat = [0] * 64
+
+        for abs_code, min_val, max_val in abs_bits:
+            absmin[abs_code] = min_val
+            absmax[abs_code] = max_val
+
+        absmax_bytes = struct.pack("64i", *absmax)
+        absmin_bytes = struct.pack("64i", *absmin)
+        absfuzz_bytes = struct.pack("64i", *absfuzz)
+        absflat_bytes = struct.pack("64i", *absflat)
+
+        user_dev = name_padded + input_id + struct.pack("i", 0) + absmax_bytes + absmin_bytes + absfuzz_bytes + absflat_bytes
+        os.write(self.fd, user_dev)
+        fcntl.ioctl(self.fd, UI_DEV_CREATE)
+
+    def write_event(self, ev_type: int, ev_code: int, ev_val: int):
+        if self.mock or self.fd is None:
+            return
+        now = time.time()
+        sec = int(now)
+        usec = int((now - sec) * 1_000_000)
+        # Format depends on architecture (standard Linux 64-bit: llHHi)
+        pkt = struct.pack("llHHi", sec, usec, ev_type, ev_code, ev_val)
+        try:
+            os.write(self.fd, pkt)
+        except OSError:
+            pass
+
+    def syn(self):
+        self.write_event(EV_SYN, SYN_REPORT, 0)
+
+    def handle_touch(self, action: int, pointer_id: int, x: int, y: int, pressure: int):
+        slot = pointer_id % 10
+        self.write_event(EV_ABS, ABS_MT_SLOT, slot)
+
+        if action in (ACTION_DOWN, ACTION_POINTER_DOWN):
+            self.tracking_counter = (self.tracking_counter + 1) % 65535 or 1
+            self.active_slots[slot] = self.tracking_counter
+            self.write_event(EV_ABS, ABS_MT_TRACKING_ID, self.active_slots[slot])
+            self.write_event(EV_ABS, ABS_MT_POSITION_X, x)
+            self.write_event(EV_ABS, ABS_MT_POSITION_Y, y)
+            self.write_event(EV_ABS, ABS_MT_PRESSURE, pressure)
+            self.write_event(EV_KEY, BTN_TOUCH, 1)
+
+        elif action == ACTION_MOVE:
+            if slot in self.active_slots:
+                self.write_event(EV_ABS, ABS_MT_POSITION_X, x)
+                self.write_event(EV_ABS, ABS_MT_POSITION_Y, y)
+                self.write_event(EV_ABS, ABS_MT_PRESSURE, pressure)
+
+        elif action in (ACTION_UP, ACTION_POINTER_UP, ACTION_CANCEL):
+            if slot in self.active_slots:
+                self.write_event(EV_ABS, ABS_MT_TRACKING_ID, -1)
+                del self.active_slots[slot]
+                if not self.active_slots:
+                    self.write_event(EV_KEY, BTN_TOUCH, 0)
+
+        self.syn()
+
+    def handle_stylus(self, action: int, x: int, y: int, pressure: int, tilt_x: int, buttons: int, is_eraser: bool):
+        tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
+        self.write_event(EV_KEY, tool, 1)
+        self.write_event(EV_ABS, ABS_X, x)
+        self.write_event(EV_ABS, ABS_Y, y)
+        self.write_event(EV_ABS, ABS_PRESSURE, pressure)
+        self.write_event(EV_ABS, ABS_TILT_X, tilt_x)
+
+        if action in (ACTION_DOWN, ACTION_MOVE):
+            self.write_event(EV_KEY, BTN_TOUCH, 1)
+        elif action in (ACTION_UP, ACTION_CANCEL):
+            self.write_event(EV_KEY, BTN_TOUCH, 0)
+            self.write_event(EV_KEY, tool, 0)
+
+        # Button states (e.g. stylus barrel buttons)
+        self.write_event(EV_KEY, BTN_STYLUS, 1 if (buttons & 0x02) else 0)
+        self.write_event(EV_KEY, BTN_STYLUS2, 1 if (buttons & 0x04) else 0)
+        self.syn()
+
+    def release_all(self):
+        """Release all pressed contacts to prevent stuck keys."""
+        if self.is_touch:
+            for slot in list(self.active_slots.keys()):
+                self.write_event(EV_ABS, ABS_MT_SLOT, slot)
+                self.write_event(EV_ABS, ABS_MT_TRACKING_ID, -1)
+            self.active_slots.clear()
+            self.write_event(EV_KEY, BTN_TOUCH, 0)
+        else:
+            self.write_event(EV_KEY, BTN_TOUCH, 0)
+            self.write_event(EV_KEY, BTN_TOOL_PEN, 0)
+            self.write_event(EV_KEY, BTN_TOOL_RUBBER, 0)
+            self.write_event(EV_KEY, BTN_STYLUS, 0)
+            self.write_event(EV_KEY, BTN_STYLUS2, 0)
+        self.syn()
+
+    def close(self):
+        self.release_all()
+        if self.fd is not None:
+            try:
+                fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+
+def parse_packet(data: bytes):
+    if len(data) != PACKET_LEN:
+        return None
+    magic, action, tool, pointer_id, x, y, pressure, tilt_x, tilt_y, buttons, _, _, _ = struct.unpack(
+        "<BBBBIIIhhBBBB", data
+    )
+    if magic != MAGIC:
+        return None
+    return {
+        "action": action,
+        "tool": tool,
+        "pointer_id": pointer_id,
+        "x": x,
+        "y": y,
+        "pressure": pressure,
+        "tilt_x": tilt_x,
+        "buttons": buttons,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="DroidLink Wayland Touch & Stylus Receiver")
+    parser.add_argument("--port", type=int, default=4820, help="TCP port to listen on (default: 4820)")
+    parser.add_argument("--mock", action="store_true", help="Run without opening real /dev/uinput")
+    args = parser.parse_args()
+
+    try:
+        touch_dev = UinputDevice("DroidLink Touch Screen", is_touch=True, mock=args.mock)
+        stylus_dev = UinputDevice("DroidLink Stylus", is_touch=False, mock=args.mock)
+    except PermissionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Failed to create virtual input devices: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_sock.bind(("127.0.0.1", args.port))
+    server_sock.listen(1)
+
+    print(f"DroidLink input driver listening on 127.0.0.1:{args.port} (devices: 'DroidLink Touch Screen', 'DroidLink Stylus')...")
+
+    def handle_exit(sig, frame):
+        print("\nShutting down DroidLink input driver...")
+        touch_dev.close()
+        stylus_dev.close()
+        server_sock.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
+    while True:
+        try:
+            client, addr = server_sock.accept()
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            print(f"Touch client connected from {addr}")
+
+            buf = bytearray()
+            while True:
+                chunk = client.recv(1024)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+                while len(buf) >= PACKET_LEN:
+                    pkt_bytes = bytes(buf[:PACKET_LEN])
+                    del buf[:PACKET_LEN]
+
+                    event = parse_packet(pkt_bytes)
+                    if not event:
+                        continue
+
+                    tool = event["tool"]
+                    if tool in (TOOL_STYLUS, TOOL_ERASER):
+                        stylus_dev.handle_stylus(
+                            event["action"],
+                            event["x"],
+                            event["y"],
+                            event["pressure"],
+                            event["tilt_x"],
+                            event["buttons"],
+                            is_eraser=(tool == TOOL_ERASER),
+                        )
+                    else:
+                        touch_dev.handle_touch(
+                            event["action"],
+                            event["pointer_id"],
+                            event["x"],
+                            event["y"],
+                            event["pressure"],
+                        )
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception as e:
+            print(f"Client connection error: {e}", file=sys.stderr)
+        finally:
+            touch_dev.release_all()
+            stylus_dev.release_all()
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    main()

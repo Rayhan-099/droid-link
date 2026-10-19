@@ -60,14 +60,94 @@ This unloads all `Tablet_Audio` virtual sinks and restores your default sound ca
 
 ---
 
-## 3. Disconnect Watchdog Diagnostics
+## 3. Touch & Stylus Input Issues
 
-Check the watchdog activity log:
+### Error: `Permission denied: '/dev/uinput'`
+**Symptom**: `tablet input start` fails with permission errors accessing `/dev/uinput`.
+**Solution**:
+1. Run the non-root uinput setup script:
+   ```bash
+   sudo ./scripts/setup-uinput.sh
+   ```
+2. Log out and log back in, or refresh groups with `newgrp input`.
+3. Verify permissions: `ls -l /dev/uinput` should show group `input` with read/write permissions (`crw-rw----`).
+
+### Touch Events Offset or Appearing on Laptop Monitor
+**Symptom**: Tapping on the tablet moves the cursor or clicks windows on the primary laptop screen instead of the tablet.
+**Root Cause**: Hyprland maps new input devices to the entire virtual desktop by default unless bound to a specific output.
+**Solution**:
+Add output binding directives to your `~/.config/hypr/hyprland.conf`:
+```ini
+device {
+    name = droidlink-touch-screen
+    output = moreland
+}
+
+device {
+    name = droidlink-stylus
+    output = moreland
+}
+```
+Reload Hyprland config: `hyprctl reload`.
+
+---
+
+## 4. Multi-Device & ADB Discovery Issues
+
+### Error: `Multiple connected Android devices detected` (Exit Code 2)
+**Symptom**: Running `tablet` or `tablet audio` fails with:
+```
+[ERROR] Multiple connected Android devices detected (2).
+Specify the target tablet with: -d <SERIAL> or --device <SERIAL>
+```
+**Solution**:
+1. Run `tablet devices` to list all connected devices and their serials:
+   ```bash
+   tablet devices
+   ```
+2. Run your command with the explicit `-d <SERIAL>` option:
+   ```bash
+   tablet -d 24074RPD2I start
+   tablet -d 24074RPD2I audio
+   ```
+
+### Device Shows "unauthorized" (Exit Code 3)
+**Symptom**: Tool reports device is unauthorized.
+**Solution**:
+Unlock the tablet screen and look for the popup dialog: **"Allow USB debugging?"**.
+Tick **"Always allow from this computer"** and tap **Allow**.
+
+---
+
+## 5. Disconnect Watchdog Diagnostics
+
+Check the watchdog activity log for the target device:
 ```bash
-cat ~/.config/tablet/watchdog.log
+cat ~/.config/tablet/<SERIAL>/watchdog.log
+# (Or ~/.config/tablet/watchdog.log for legacy single-device setups)
 ```
 To restart the watchdog cleanly:
 ```bash
 tablet audio stop
 tablet audio
 ```
+
+---
+
+## 6. Xiaomi HyperOS / MIUI Nuances
+
+### "Install via USB" Dialog Requires Mi Account
+Xiaomi requires a SIM card and active Mi Account to enable "Install via USB" in Developer Options.
+**Workaround**: You do not need "Install via USB" to use DroidLink! Simply push the APK to internal storage:
+```bash
+adb push android/display/build/outputs/apk/release/display-release.apk /sdcard/Download/
+adb push android/audio/build/outputs/apk/release/audio-release.apk /sdcard/Download/
+```
+Open **File Manager** on the tablet, go to **Downloads**, and tap the APKs to install directly.
+
+### Background Audio Drops Out When Screen Locks
+HyperOS aggressively suspends background apps to save power.
+**Solution**:
+1. Open **Settings > Apps > Manage apps > Droid Link Audio**.
+2. Tap **Battery saver** and change to **No restrictions**.
+3. Enable **Autostart**.

@@ -15,12 +15,12 @@ index 617832d..91f79e8 100644
 --- a/crates/capture/src/lib.rs
 +++ b/crates/capture/src/lib.rs
 @@ -22,6 +22,8 @@ pub const VIRTUAL_OUTPUT_NAME: &str = "moreland";
- 
+
  /// `XR24` — opaque 8-bit BGRX, the format captured from the virtual output.
  pub const XR24: u32 = u32::from_le_bytes(*b"XR24");
 +/// `AR24` — 8-bit BGRA (DRM_FORMAT_ARGB8888).
 +pub const AR24: u32 = u32::from_le_bytes(*b"AR24");
- 
+
  /// Fallback modifiers when the encoder cannot be probed.
  ///
 diff --git a/crates/capture/src/session.rs b/crates/capture/src/session.rs
@@ -74,7 +74,7 @@ index e1a5460..e0aba9b 100644
 +                    &self.allowed_formats,
 +                )?;
                  format = fourcc;
- 
+
                  let dev = caps
 @@ -708,32 +718,67 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
  /// substitute something the consumer cannot read.
@@ -108,7 +108,7 @@ index e1a5460..e0aba9b 100644
 +            }
 +        }
 +    }
- 
+
 +    // Fallback: legacy allowed_modifiers path
      for wanted in [XR24, AR24] {
          let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) else {
@@ -123,7 +123,7 @@ index e1a5460..e0aba9b 100644
              return Ok((*fourcc, vec![*modifier]));
          }
      }
- 
+
 -    if allowed.is_empty() {
 +    if allowed_modifiers.is_empty() && allowed_formats.is_empty() {
          bail!("no supported DMA-BUF format offered");
@@ -152,20 +152,20 @@ index e1a5460..e0aba9b 100644
      )
  }
 diff --git a/crates/daemon/src/session.rs b/crates/daemon/src/session.rs
-index 33a6c7f..adb8694 100644
+index 33a6c7f..c6686a1 100644
 --- a/crates/daemon/src/session.rs
 +++ b/crates/daemon/src/session.rs
 @@ -15,8 +15,10 @@ use transport::{adb, stream_header, Sender};
- 
+
  use crate::output::VirtualOutput;
- 
+
 -const APP_PACKAGE: &str = "com.moreland.display";
 -const APP_ACTIVITY: &str = "com.moreland.display/.DisplayActivity";
 +const DROIDLINK_PACKAGE: &str = "io.github.rayhan099.droidlink.display";
 +const DROIDLINK_ACTIVITY: &str = "io.github.rayhan099.droidlink.display/.DisplayActivity";
 +const LEGACY_PACKAGE: &str = "com.moreland.display";
 +const LEGACY_ACTIVITY: &str = "com.moreland.display/.DisplayActivity";
- 
+
  #[derive(Debug, Clone)]
  pub struct Config {
 @@ -40,19 +42,8 @@ impl Default for Config {
@@ -191,7 +191,7 @@ index 33a6c7f..adb8694 100644
 @@ -62,9 +53,20 @@ impl Default for Config {
      }
  }
- 
+
 +pub fn resolve_app(serial: &str) -> Result<Option<(&'static str, &'static str)>> {
 +    let out = adb::shell(serial, "pm list packages")?;
 +    if out.contains(DROIDLINK_PACKAGE) {
@@ -209,7 +209,7 @@ index 33a6c7f..adb8694 100644
 -    Ok(out.contains(APP_PACKAGE))
 +    Ok(resolve_app(serial)?.is_some())
  }
- 
+
  /// Stream until `shutdown` is set, the device vanishes, or the app disconnects.
 @@ -72,13 +74,16 @@ pub fn app_installed(serial: &str) -> Result<bool> {
  /// Every resource here is RAII-scoped: the virtual output and the adb forward
@@ -232,27 +232,27 @@ index 33a6c7f..adb8694 100644
 +            );
 +        }
 +    };
- 
+
      // Match the tablet's own aspect ratio unless told otherwise, so the image
      // fills its screen instead of letterboxing.
 @@ -131,7 +136,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
- 
+
      // The abstract socket name is process-wide on Android, so a stale instance
      // from a previous run would keep it bound and answer with a dead surface.
 -    let _ = adb::shell(serial, &format!("am force-stop {APP_PACKAGE}"));
 +    let _ = adb::shell(serial, &format!("am force-stop {app_pkg}"));
      std::thread::sleep(Duration::from_millis(500));
- 
+
      // Wake the tablet first. A sleeping or locked device starts the activity
 @@ -143,21 +148,22 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
      let _ = adb::shell(serial, "wm dismiss-keyguard");
      std::thread::sleep(Duration::from_millis(400));
- 
+
 -    adb::shell(serial, &format!("am start -n {APP_ACTIVITY}"))
 +    adb::shell(serial, &format!("am start -n {app_activity}"))
          .context("launching the display app")?;
      std::thread::sleep(Duration::from_millis(2500));
- 
+
      // Probe what this machine's encoder can actually import rather than
 -    // assuming; the accepted modifier set is GPU-vendor specific.
 -    let allowed_modifiers = encoder::supported_modifiers(capture::XR24);
@@ -260,7 +260,7 @@ index 33a6c7f..adb8694 100644
 +    // assuming; the accepted format and modifier set is GPU-vendor specific.
 +    let allowed_formats = encoder::supported_dmabuf_formats();
 +    tracing::debug!("encoder accepts formats {allowed_formats:02x?}");
- 
+
      let mut capture = Capture::new(
          output.name(),
          &CaptureConfig {
@@ -272,15 +272,110 @@ index 33a6c7f..adb8694 100644
              paint_cursor: config.paint_cursor,
          },
      )?;
-@@ -264,7 +270,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
- 
+@@ -237,6 +243,9 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+
+     let frame_duration_ns = 1_000_000_000u64 / u64::from(config.fps);
+     let mut index = 0u64;
++    let mut last_eval_index = 0u64;
++    let mut bitrate_ctrl = BitrateController::new(config.bitrate_kbps);
++
+     let result = (|| -> Result<()> {
+         while !shutdown.load(Ordering::Relaxed) {
+             let timing = capture.capture_frame()?;
+@@ -246,6 +255,24 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+             encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, index * frame_duration_ns)?;
+             index += 1;
+
++            if index >= last_eval_index + 60 {
++                last_eval_index = index;
++                let recent_rtts = {
++                    let rt = round_trips.lock().unwrap();
++                    let len = rt.len();
++                    if len >= 10 {
++                        rt[len - 10..].to_vec()
++                    } else {
++                        rt.clone()
++                    }
++                };
++                if let Some(median) = median_duration(&recent_rtts) {
++                    if let Some(new_kbps) = bitrate_ctrl.evaluate(median) {
++                        encoder.set_bitrate(new_kbps);
++                    }
++                }
++            }
++
+             while let Ok((data, pts, keyframe)) = packet_rx.try_recv() {
+                 sent_at.lock().unwrap().push_back(Instant::now());
+                 sender.send_frame(&data, pts, keyframe)?;
+@@ -264,7 +291,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
+
      // Leaving the app in the foreground with a dead socket is confusing; send
      // it home so the tablet returns to a normal state.
 -    let _ = adb::shell(serial, &format!("am force-stop {APP_PACKAGE}"));
 +    let _ = adb::shell(serial, &format!("am force-stop {app_pkg}"));
- 
+
      drop(forward);
      drop(output);
+@@ -288,3 +315,59 @@ fn report(trips: &[Duration], frames: u64, bytes: u64) {
+     println!("    p95       {:>8.2} ms", ms(trips[trips.len() * 95 / 100]));
+     println!("    max       {:>8.2} ms", ms(trips[trips.len() - 1]));
+ }
++
++pub struct BitrateController {
++    current_kbps: u32,
++    min_kbps: u32,
++    max_kbps: u32,
++    last_adjustment: Instant,
++    cooldown: Duration,
++}
++
++impl BitrateController {
++    pub fn new(initial_kbps: u32) -> Self {
++        Self {
++            current_kbps: initial_kbps,
++            min_kbps: 5_000,
++            max_kbps: 30_000,
++            last_adjustment: Instant::now(),
++            cooldown: Duration::from_secs(5),
++        }
++    }
++
++    pub fn evaluate(&mut self, median_rtt: Duration) -> Option<u32> {
++        let now = Instant::now();
++        if now.duration_since(self.last_adjustment) < self.cooldown {
++            return None;
++        }
++
++        let ms = median_rtt.as_secs_f64() * 1000.0;
++        if ms > 45.0 && self.current_kbps > self.min_kbps {
++            let new_kbps = ((self.current_kbps as f64 * 0.8) as u32).max(self.min_kbps);
++            if new_kbps != self.current_kbps {
++                self.current_kbps = new_kbps;
++                self.last_adjustment = now;
++                tracing::info!("Adaptive bitrate reduced to {new_kbps} kbps (median RTT: {ms:.1} ms)");
++                return Some(new_kbps);
++            }
++        } else if ms < 25.0 && self.current_kbps < self.max_kbps {
++            let new_kbps = ((self.current_kbps as f64 * 1.1) as u32).min(self.max_kbps);
++            if new_kbps != self.current_kbps {
++                self.current_kbps = new_kbps;
++                self.last_adjustment = now;
++                tracing::info!("Adaptive bitrate increased to {new_kbps} kbps (median RTT: {ms:.1} ms)");
++                return Some(new_kbps);
++            }
++        }
++        None
++    }
++}
++
++fn median_duration(durations: &[Duration]) -> Option<Duration> {
++    if durations.is_empty() {
++        return None;
++    }
++    let mut sorted = durations.to_vec();
++    sorted.sort_unstable();
++    Some(sorted[sorted.len() / 2])
++}
 diff --git a/crates/encoder/src/bin/encode_probe.rs b/crates/encoder/src/bin/encode_probe.rs
 index c13bb24..f98bf5e 100644
 --- a/crates/encoder/src/bin/encode_probe.rs
@@ -296,13 +391,13 @@ index c13bb24..f98bf5e 100644
      };
      let mut capture = Capture::new(&output, &capture_config)?;
 diff --git a/crates/encoder/src/lib.rs b/crates/encoder/src/lib.rs
-index 2137852..6b80028 100644
+index 2137852..1ecf737 100644
 --- a/crates/encoder/src/lib.rs
 +++ b/crates/encoder/src/lib.rs
 @@ -23,19 +23,10 @@ use gstreamer_video::{VideoFormat, VideoFrameFlags, VideoMeta};
  use std::os::fd::BorrowedFd;
  use std::time::Duration;
- 
+
 -/// DRM format modifiers the VA encoder chain can import for `fourcc`, probed
 -/// from `vapostproc`'s advertised `memory:DMABuf` sink caps.
 -///
@@ -320,7 +415,7 @@ index 2137852..6b80028 100644
 +/// discovered from `vapostproc`'s advertised `memory:DMABuf` sink caps.
 +pub fn supported_dmabuf_formats() -> Vec<(u32, Vec<u64>)> {
 +    let mut result: Vec<(u32, Vec<u64>)> = Vec::new();
- 
+
      if gst::init().is_ok() {
          if let Some(factory) = gst::ElementFactory::find("vapostproc") {
 @@ -51,51 +42,64 @@ pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
@@ -333,7 +428,7 @@ index 2137852..6b80028 100644
              }
          }
      }
- 
+
 -    if !modifiers.contains(&0) {
 -        modifiers.push(0); // DRM_FORMAT_MOD_LINEAR
 -    }
@@ -349,7 +444,7 @@ index 2137852..6b80028 100644
 +        .map(|(_, m)| m)
 +        .unwrap_or_default()
  }
- 
+
 -/// `drm-format` is either a single string or a list of `FOURCC:0xMODIFIER`.
 -fn collect_modifiers(value: &gst::glib::Value, wanted: &str, out: &mut Vec<u64>) {
 +fn collect_all_drm_formats(value: &gst::glib::Value, out: &mut Vec<(u32, Vec<u64>)>) {
@@ -370,7 +465,7 @@ index 2137852..6b80028 100644
          }
      }
  }
- 
+
 -fn parse_drm_format(text: &str, wanted: &str) -> Option<u64> {
 +fn parse_any_drm_format(text: &str) -> Option<(u32, u64)> {
      let text = text.trim();
@@ -407,5 +502,34 @@ index 2137852..6b80028 100644
 +        out.push((fourcc, vec![modifier]));
 +    }
  }
- 
+
  pub struct EncoderConfig {
+@@ -159,6 +163,7 @@ pub struct Encoder {
+     appsrc: AppSrc,
+     appsink: AppSink,
+     allocator: DmaBufAllocator,
++    encoder_element: gst::Element,
+     frame_size: usize,
+     width: u32,
+     height: u32,
+@@ -277,6 +282,7 @@ impl Encoder {
+             appsrc,
+             appsink,
+             allocator: DmaBufAllocator::new(),
++            encoder_element: encoder,
+             // Conservative upper bound; the kernel clamps the mapping to the
+             // real dmabuf size and tiled layouts are never larger than this.
+             frame_size: (config.width as usize) * (config.height as usize) * 4,
+@@ -285,6 +291,12 @@ impl Encoder {
+         })
+     }
+
++    /// Dynamically adjust video encoder bitrate at runtime without resetting pipeline.
++    pub fn set_bitrate(&self, bitrate_kbps: u32) {
++        self.encoder_element.set_property("bitrate", bitrate_kbps);
++        self.encoder_element.set_property("cpb-size", bitrate_kbps / 2);
++    }
++
+     /// Submit a captured frame.
+     ///
+     /// `alloc_dmabuf` takes ownership of the fd and closes it with the memory,

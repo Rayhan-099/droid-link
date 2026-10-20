@@ -47,6 +47,15 @@ get_waybar_json() {
     if is_display_active; then disp_on=true; fi
     if is_audio_active; then audio_on=true; fi
 
+    local disp_mode="ACTIVE"
+    if [[ "${disp_on}" == true ]]; then
+        local m_info
+        m_info="$(hyprctl monitors 2>/dev/null | awk '/Monitor moreland/ {getline; print $1}')"
+        if [[ -n "${m_info}" ]]; then
+            disp_mode="ACTIVE (${m_info})"
+        fi
+    fi
+
     local icon=""
     local class=""
     local text=""
@@ -56,12 +65,12 @@ get_waybar_json() {
         icon="󰍹 󰓃"
         class="active"
         text="Tablet: Display + Audio"
-        tooltip="DroidLink: Display ACTIVE (1920x1200@90Hz)\nAudio: ACTIVE (Tablet_Audio)\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Toggle Audio | Right-click: Stop All"
+        tooltip="DroidLink: Display ${disp_mode}\nAudio: ACTIVE (Tablet_Audio)\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Toggle Audio | Right-click: Stop All"
     elif [[ "${disp_on}" == true ]]; then
         icon="󰍹"
         class="display-only"
         text="Tablet: Display"
-        tooltip="DroidLink: Display ACTIVE (1920x1200@90Hz)\nAudio: Inactive\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Start Audio | Right-click: Stop All"
+        tooltip="DroidLink: Display ${disp_mode}\nAudio: Inactive\nDevice: ${dev}\nLeft-click: Toggle Display | Middle-click: Start Audio | Right-click: Stop All"
     elif [[ "${audio_on}" == true ]]; then
         icon="󰓃"
         class="audio-only"

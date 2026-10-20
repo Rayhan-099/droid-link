@@ -1,0 +1,19 @@
+[Unit]
+Description=DroidLink Wayland Touch & Stylus Input Driver
+Documentation=https://github.com/Rayhan-099/droid-link
+PartOf=graphical-session.target
+After=graphical-session.target moreland.service
+
+[Service]
+Type=simple
+ExecStartPre=-/home/rayhan/.local/bin/adb reverse tcp:4820 tcp:4820
+ExecStart=/home/rayhan/.local/bin/droidlink-input --port 4820
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Environment=XDG_RUNTIME_DIR=%t
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

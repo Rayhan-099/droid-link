@@ -9,7 +9,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/moreland --position 1920 --position-y 0
+ExecStart=%h/.local/bin/moreland --native --scale 1.6 --fps 60 --bitrate 24000 --position 1920 --position-y 0
 Restart=on-failure
 RestartSec=5
 

@@ -11,9 +11,11 @@ import struct
 import fcntl
 import signal
 import argparse
+import subprocess
 
 # Protocol constants
 MAGIC = 0xD1
+
 PACKET_LEN = 24
 
 ACTION_DOWN = 1
@@ -63,12 +65,14 @@ ABS_MT_PRESSURE = 0x3A
 
 UI_SET_EVBIT = 0x40045564
 UI_SET_KEYBIT = 0x40045565
-UI_SET_ABSBIT = 0x40045566
+UI_SET_ABSBIT = 0x40045567
+UI_SET_PROPBIT = 0x4004556e
 UI_DEV_CREATE = 0x5501
 UI_DEV_DESTROY = 0x5502
 
 BUS_VIRTUAL = 0x06
 UINPUT_MAX_NAME_SIZE = 80
+INPUT_PROP_DIRECT = 0x01
 
 
 class UinputDevice:
@@ -110,6 +114,7 @@ class UinputDevice:
         fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_SYN)
         fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
         fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_ABS)
+        fcntl.ioctl(self.fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT)
 
         if self.is_touch:
             fcntl.ioctl(self.fd, UI_SET_KEYBIT, BTN_TOUCH)
@@ -156,8 +161,23 @@ class UinputDevice:
         user_dev = name_padded + input_id + struct.pack("i", 0) + absmax_bytes + absmin_bytes + absfuzz_bytes + absflat_bytes
         os.write(self.fd, user_dev)
         fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        self._map_to_hyprland()
+
+    def _map_to_hyprland(self, monitor_name: str = "moreland"):
+        """Map the virtual input device to the tablet monitor in Hyprland if active."""
+        if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            return
+        try:
+            hypr_dev_name = self.name.lower().replace(" ", "-")
+            lua_code = f'hl.device({{ name = "{hypr_dev_name}", output = "{monitor_name}" }})'
+            res = subprocess.run(["hyprctl", "eval", lua_code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if res.returncode != 0:
+                subprocess.run(["hyprctl", "keyword", f"device[{hypr_dev_name}]:output", monitor_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
 
     def write_event(self, ev_type: int, ev_code: int, ev_val: int):
+
         if self.mock or self.fd is None:
             return
         now = time.time()
@@ -306,8 +326,14 @@ def main():
         server_sock.close()
         sys.exit(0)
 
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+
     signal.signal(signal.SIGINT, handle_exit)
     signal.signal(signal.SIGTERM, handle_exit)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     while True:
         try:

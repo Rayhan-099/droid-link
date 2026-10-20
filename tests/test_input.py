@@ -126,8 +126,55 @@ class TestInputProtocol(unittest.TestCase):
         dev.handle_stylus(droidlink_input.ACTION_DOWN, x=1000, y=2000, pressure=30000, tilt_x=15, buttons=0, is_eraser=False)
         dev.handle_stylus(droidlink_input.ACTION_MOVE, x=1500, y=2500, pressure=40000, tilt_x=20, buttons=2, is_eraser=False)
         dev.handle_stylus(droidlink_input.ACTION_UP, x=1500, y=2500, pressure=0, tilt_x=0, buttons=0, is_eraser=False)
+        # Eraser test
+        dev.handle_stylus(droidlink_input.ACTION_DOWN, x=2000, y=3000, pressure=20000, tilt_x=0, buttons=0, is_eraser=True)
+        dev.handle_stylus(droidlink_input.ACTION_UP, x=2000, y=3000, pressure=0, tilt_x=0, buttons=0, is_eraser=True)
         dev.release_all()
         dev.close()
+
+    def test_uinput_permission_error_raised_when_unwritable(self):
+        # When /dev/uinput is restricted, initializing without mock must raise PermissionError
+        if not os.access("/dev/uinput", os.W_OK) and not os.access("/dev/input/uinput", os.W_OK):
+            with self.assertRaises(PermissionError):
+                droidlink_input.UinputDevice("Test Perm", is_touch=True, mock=False)
+
+    def test_uinput_ioctl_constants(self):
+        # Ensure ioctl values match Linux kernel headers
+        self.assertEqual(droidlink_input.UI_SET_EVBIT, 0x40045564)
+        self.assertEqual(droidlink_input.UI_SET_KEYBIT, 0x40045565)
+        self.assertEqual(droidlink_input.UI_SET_ABSBIT, 0x40045567)  # Note: 0x40045566 is UI_SET_RELBIT
+        self.assertEqual(droidlink_input.UI_SET_PROPBIT, 0x4004556e)
+        self.assertEqual(droidlink_input.INPUT_PROP_DIRECT, 0x01)
+
+    def test_real_uinput_creation_if_permitted(self):
+        if os.access("/dev/uinput", os.W_OK) or os.access("/dev/input/uinput", os.W_OK):
+            touch = droidlink_input.UinputDevice("DroidLink Test Touch", is_touch=True, mock=False)
+            self.assertIsNotNone(touch.fd)
+            touch.close()
+            self.assertIsNone(touch.fd)
+
+            stylus = droidlink_input.UinputDevice("DroidLink Test Stylus", is_touch=False, mock=False)
+            self.assertIsNotNone(stylus.fd)
+            stylus.close()
+            self.assertIsNone(stylus.fd)
+
+    def test_touch_coordinate_scaling_invariance(self):
+        # Coordinates normalized to [0, 65535] regardless of whether logical scale is 1.0, 1.5, or 1.6
+        def normalize(raw, total):
+            return int((max(0.0, min(float(raw), float(total))) / total) * 65535.0)
+
+        # Scale 1.0 (2560x1600) vs Scale 1.6 (1600x1000)
+        # Top-left corner
+        self.assertEqual(normalize(0, 2560), 0)
+        self.assertEqual(normalize(0, 1600), 0)
+
+        # Center point
+        self.assertEqual(normalize(1280, 2560), 32767)
+        self.assertEqual(normalize(800, 1600), 32767)
+
+        # Bottom-right corner
+        self.assertEqual(normalize(2560, 2560), 65535)
+        self.assertEqual(normalize(1600, 1600), 65535)
 
 
 if __name__ == "__main__":

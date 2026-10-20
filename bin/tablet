@@ -52,23 +52,46 @@ get_input_pid_file() {
     echo "${state_dir}/input.pid"
 }
 
+get_input_log_file() {
+    local dev="${1:-}"
+    local state_dir="$(droidlink_get_device_state_dir "${dev}")"
+    echo "${state_dir}/input.log"
+}
+
 is_input_active() {
     local dev="${1:-}"
     local pid_file="$(get_input_pid_file "${dev}")"
     if [[ -f "${pid_file}" ]]; then
         local pid
         pid="$(cat "${pid_file}" 2>/dev/null || true)"
-        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-            return 0
+        if [[ -n "${pid}" ]] && ! kill -0 "${pid}" 2>/dev/null; then
+            rm -f "${pid_file}"
+        fi
+    fi
+    local default_pid_file="$(get_input_pid_file "default")"
+    if [[ -f "${default_pid_file}" ]]; then
+        local dpid="$(cat "${default_pid_file}" 2>/dev/null || true)"
+        if [[ -n "${dpid}" ]] && ! kill -0 "${dpid}" 2>/dev/null; then
+            rm -f "${default_pid_file}"
         fi
     fi
     if [[ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid" ]]; then
         local lpid="$(cat "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid" 2>/dev/null || true)"
-        if [[ -n "${lpid}" ]] && kill -0 "${lpid}" 2>/dev/null; then
-            return 0
+        if [[ -n "${lpid}" ]] && ! kill -0 "${lpid}" 2>/dev/null; then
+            rm -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid"
         fi
     fi
-    pgrep -f "droidlink-input" >/dev/null 2>&1
+
+    if systemctl --user is-active --quiet droidlink-input.service 2>/dev/null; then
+        return 0
+    fi
+    if [[ -f "${pid_file}" ]]; then
+        return 0
+    fi
+    if [[ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid" ]]; then
+        return 0
+    fi
+    pgrep -f "[d]roidlink-input" >/dev/null 2>&1
 }
 
 start_input_driver() {
@@ -77,22 +100,51 @@ start_input_driver() {
         return 0
     fi
 
-    if [[ -x "${INPUT_DRIVER}" ]]; then
-        echo "Starting DroidLink Wayland touch & stylus driver..."
-        # Configure ADB reverse tunnel for touch input (port 4820)
-        "${DROIDLINK_ADB}" -s "${dev}" reverse tcp:4820 tcp:4820 2>/dev/null || true
+    # Configure ADB reverse tunnel for touch input (port 4820)
+    "${DROIDLINK_ADB}" -s "${dev}" reverse tcp:4820 tcp:4820 2>/dev/null || true
 
-        # Launch input driver in background
-        nohup "${INPUT_DRIVER}" --port 4820 >/dev/null 2>&1 &
-        local pid=$!
+    # Try starting systemd service if installed
+    if systemctl --user list-unit-files droidlink-input.service 2>/dev/null | grep -q "droidlink-input.service"; then
+        echo "Starting DroidLink Wayland touch & stylus driver (systemd)..."
+        systemctl --user start droidlink-input.service
+        sleep 0.2
+        if systemctl --user is-active --quiet droidlink-input.service; then
+            return 0
+        fi
+    fi
+
+    if [[ -x "${INPUT_DRIVER}" ]]; then
         local pid_file="$(get_input_pid_file "${dev}")"
+        local log_file="$(get_input_log_file "${dev}")"
         mkdir -p "$(dirname "${pid_file}")"
+
+        echo "Starting DroidLink Wayland touch & stylus driver..."
+        # Launch input driver in background and log to state directory
+        nohup "${INPUT_DRIVER}" --port 4820 > "${log_file}" 2>&1 < /dev/null &
+        local pid=$!
+        disown "${pid}" 2>/dev/null || true
         echo "${pid}" > "${pid_file}"
+
+        sleep 0.2
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            local reason
+            reason="$(grep -m 1 "^Error:" "${log_file}" 2>/dev/null || head -n 1 "${log_file}" 2>/dev/null || echo "Exited unexpectedly")"
+            rm -f "${pid_file}"
+            echo "Error: Touch driver failed to start (${reason}). Run 'tablet doctor' for instructions." >&2
+            return 1
+        fi
+        return 0
+    else
+        echo "Error: Input driver binary not found or not executable: ${INPUT_DRIVER}" >&2
+        return 1
     fi
 }
 
 stop_input_driver() {
     local dev="${1:-}"
+    if systemctl --user is-active --quiet droidlink-input.service 2>/dev/null; then
+        systemctl --user stop droidlink-input.service 2>/dev/null || true
+    fi
     local pid_file="$(get_input_pid_file "${dev}")"
     if [[ -f "${pid_file}" ]]; then
         local pid
@@ -103,14 +155,15 @@ stop_input_driver() {
         rm -f "${pid_file}"
     fi
     rm -f "${XDG_CONFIG_HOME:-${HOME}/.config}/tablet/input.pid"
-    pkill -f "droidlink-input" 2>/dev/null || true
+    pkill -f "[d]roidlink-input" 2>/dev/null || true
 }
+
 
 case "${ACTION}" in
   start)
     dev="$(droidlink_resolve_device "${TARGET_DEVICE}")"
     echo "Starting DroidLink extended display on device: ${dev}..."
-    start_input_driver "${dev}"
+    start_input_driver "${dev}" || true
     systemctl --user start moreland.service
     ;;
 
@@ -129,18 +182,35 @@ case "${ACTION}" in
     case "${subcmd}" in
       start)
         dev="$(droidlink_resolve_device "${TARGET_DEVICE}")"
-        start_input_driver "${dev}"
-        echo "Touch and stylus input driver active on device ${dev}."
+        if start_input_driver "${dev}"; then
+            echo "Touch and stylus input driver active on device ${dev}."
+        else
+            echo "Failed to activate touch and stylus input driver on device ${dev}." >&2
+            exit 1
+        fi
         ;;
       stop)
         stop_input_driver "${TARGET_DEVICE:-}"
         echo "Touch and stylus input driver stopped."
         ;;
       status)
-        if is_input_active "${TARGET_DEVICE:-}"; then
+        dev="$(droidlink_resolve_device "${TARGET_DEVICE}" 2>/dev/null || echo "")"
+        if is_input_active "${dev:-${TARGET_DEVICE:-}}"; then
             echo "Touch/Stylus driver: RUNNING (tcp:4820 forward active)"
         else
-            echo "Touch/Stylus driver: INACTIVE"
+            log_file="$(get_input_log_file "${dev}")"
+            if [[ ! -w "/dev/uinput" ]] && [[ ! -w "/dev/input/uinput" ]]; then
+                echo "Touch/Stylus driver: INACTIVE (/dev/uinput restricted — run 'sudo ./scripts/setup-uinput.sh')"
+            elif [[ -f "${log_file}" ]]; then
+                last_err="$(grep -m 1 "^Error:" "${log_file}" 2>/dev/null || true)"
+                if [[ -n "${last_err}" ]]; then
+                    echo "Touch/Stylus driver: INACTIVE (${last_err})"
+                else
+                    echo "Touch/Stylus driver: INACTIVE"
+                fi
+            else
+                echo "Touch/Stylus driver: INACTIVE"
+            fi
         fi
         ;;
       *)
@@ -200,11 +270,24 @@ case "${ACTION}" in
     fi
     echo ""
     echo "=== Touch & Stylus Input ==="
-    if is_input_active; then
+    if is_input_active "${dev:-${TARGET_DEVICE:-}}"; then
         echo "Input driver: ACTIVE (uinput touch/stylus mapped to Wayland)"
     else
-        echo "Input driver: INACTIVE"
+        log_file="$(get_input_log_file "${dev}")"
+        if [[ ! -w "/dev/uinput" ]] && [[ ! -w "/dev/input/uinput" ]]; then
+            echo "Input driver: INACTIVE (/dev/uinput restricted — run 'sudo ./scripts/setup-uinput.sh')"
+        elif [[ -f "${log_file}" ]]; then
+            last_err="$(grep -m 1 "^Error:" "${log_file}" 2>/dev/null || true)"
+            if [[ -n "${last_err}" ]]; then
+                echo "Input driver: INACTIVE (${last_err})"
+            else
+                echo "Input driver: INACTIVE"
+            fi
+        else
+            echo "Input driver: INACTIVE"
+        fi
     fi
+
     echo ""
     if [[ -n "${TABLET_AUDIO}" && -x "${TABLET_AUDIO}" ]]; then
         device_flag=()

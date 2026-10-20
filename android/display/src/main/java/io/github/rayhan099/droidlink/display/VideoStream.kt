@@ -123,7 +123,11 @@ class VideoStream(private val listener: StreamListener? = null) {
         val format = MediaFormat.createVideoFormat(header.mime, header.width, header.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_FRAME_RATE, header.framerate)
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // Realtime priority
             setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            try {
+                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+            } catch (_: Exception) {}
         }
         try {
             format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
